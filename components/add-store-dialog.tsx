@@ -17,9 +17,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { createCustomer } from "@/lib/actions/customers";
+import { createStore } from "@/lib/actions/stores";
 
-export function NewCustomerDialog() {
+export function AddStoreDialog() {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [pending, setPending] = React.useState(false);
@@ -27,17 +27,16 @@ export function NewCustomerDialog() {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
-    const name = String(fd.get("name") || "New customer");
     setPending(true);
-    const res = await createCustomer(fd);
+    const res = await createStore(fd);
     setPending(false);
     if (!res.ok) {
-      toast.error("Couldn't create customer", { description: res.error });
+      toast.error("Couldn't add store", { description: res.error });
       return;
     }
     setOpen(false);
-    toast.success("Customer created", {
-      description: `${name} has been added to Ditto.`,
+    toast.success("Store added", {
+      description: `${fd.get("name")} is ready for kiosks.`,
     });
     router.refresh();
   }
@@ -47,51 +46,35 @@ export function NewCustomerDialog() {
       <DialogTrigger asChild>
         <Button>
           <Plus className="size-4" />
-          New customer
+          Add store
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <form onSubmit={handleSubmit}>
           <DialogHeader>
-            <DialogTitle>New customer</DialogTitle>
+            <DialogTitle>Add store</DialogTitle>
             <DialogDescription>
-              Add a store chain to the Ditto platform.
+              Create a new branch. You can claim kiosks into it afterwards.
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Company name</Label>
-              <Input id="name" name="name" placeholder="e.g. Roastwell Coffee" required />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="contact">Contact name</Label>
-                <Input id="contact" name="contact" placeholder="Jane Doe" />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="email">Contact email</Label>
-                <Input
-                  id="email"
-                  name="email"
-                  type="email"
-                  placeholder="jane@store.com"
-                />
-              </div>
+              <Label htmlFor="name">Store name</Label>
+              <Input
+                id="name"
+                name="name"
+                placeholder="e.g. Downtown Flagship"
+                required
+              />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="price">Per-print price (USD)</Label>
+              <Label htmlFor="address">Address</Label>
               <Input
-                id="price"
-                name="price"
-                type="number"
-                step="0.005"
-                min="0"
-                defaultValue="0.04"
+                id="address"
+                name="address"
+                placeholder="412 Market St, San Francisco, CA"
               />
-              <p className="text-xs text-muted-foreground">
-                Charged per digital receipt issued.
-              </p>
             </div>
           </div>
 
@@ -103,7 +86,7 @@ export function NewCustomerDialog() {
             </DialogClose>
             <Button type="submit" disabled={pending}>
               {pending ? <Loader2 className="size-4 animate-spin" /> : null}
-              {pending ? "Creating…" : "Create customer"}
+              {pending ? "Adding…" : "Add store"}
             </Button>
           </DialogFooter>
         </form>
