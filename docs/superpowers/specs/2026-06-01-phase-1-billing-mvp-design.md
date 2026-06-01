@@ -22,7 +22,7 @@ audit logs are explicitly **deferred to Spec 2**.
 |---|---|
 | Collection model | **Stripe metered Subscriptions** — Stripe owns the billing clock; our DB mirrors |
 | Scope | **Payment-collection MVP** (this spec) |
-| Card capture | **Embedded Stripe Elements** (`PaymentElement`, via the subscription's `pending_setup_intent`) |
+| Card capture | **Stripe Checkout Sessions** (`ui_mode: "elements"`, subscription mode) with the embedded Payment Element — Stripe's recommended path for starting subscriptions (revised from the original manual SetupIntent approach) |
 | Scheduler | **Stripe** (no cron on our side) |
 
 ## Goals
@@ -57,21 +57,23 @@ payment-receipt emails, and the **audit log** seed.
 4. Print the resulting `STRIPE_PRICE_ID` and confirm `STRIPE_METER_EVENT_NAME=receipts`
    for `.env.local`.
 
-### A. Activate billing (subscribe + capture card, in-app Elements)
+### A. Activate billing (Checkout Session, subscription mode, embedded Elements)
 
 1. Tenant opens `/tenant/billing`, clicks **Activate billing**.
 2. Server action `activateBilling(orgId)`:
    - `ensureStripeCustomer(orgId)` → find-or-create Customer; store
      `tenantSettings.stripeCustomerId`.
-   - Create a **Subscription**: `items: [{ price: STRIPE_PRICE_ID }]`,
-     `payment_behavior: 'default_incomplete'`,
-     `expand: ['pending_setup_intent']`. Metered first invoice is $0, so Stripe
-     attaches a **`pending_setup_intent`**; return its `client_secret`. Store
-     `stripeSubscriptionId`, `subscriptionStatus`.
-3. Client mounts `<PaymentElement>`, calls `stripe.confirmSetup({ redirect:
-   'if_required' })` against the setup-intent client secret.
-4. On success, the card becomes the subscription's default payment method;
-   `cardBrand`/`cardLast4` are cached (via webhook, with a server-action fallback).
+   - Create a **Checkout Session**: `mode: 'subscription'`, `ui_mode: 'elements'`,
+     `customer`, `line_items: [{ price: STRIPE_PRICE_ID }]`, `return_url`. Return
+     the session's `client_secret`. Stripe creates the subscription on confirm
+     (metered first invoice is $0, so no immediate charge — the card is saved for
+     off-session use).
+3. Client wraps the form in `<CheckoutElementsProvider stripe options={{ clientSecret }}>`
+   (from `@stripe/react-stripe-js/checkout`), mounts the Checkout `<PaymentElement>`,
+   and calls `checkout.confirm({ redirect: 'if_required' })` via `useCheckoutElements()`.
+4. On success the subscription is created; its `stripeSubscriptionId` +
+   `subscriptionStatus` and `cardBrand`/`cardLast4` are persisted via the
+   `customer.subscription.*` / `payment_method.attached` webhooks.
 
 ### B. Report usage (on ingest, non-blocking)
 
