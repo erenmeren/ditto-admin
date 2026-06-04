@@ -110,7 +110,12 @@ A single source of truth: `emailVerificationEnabled()` → `Boolean(env.RESEND_A
 
 ### Conditional signup behavior
 
-In both `registerCompany` and `acceptInviteSignup`, branch on the gate:
+Only `registerCompany` (self-serve, unverified email) branches on the gate.
+`acceptInviteSignup` stays **auto-verify always** — the invitation email was
+already delivered to that inbox, so receiving it proves ownership and a second
+verification step would be redundant friction.
+
+In `registerCompany`, branch on the gate:
 
 - **Key present (verification live):** do **not** set `emailVerified: true`, do
   **not** auto-`signInEmail`. The org/membership/tenant-settings rows are still
