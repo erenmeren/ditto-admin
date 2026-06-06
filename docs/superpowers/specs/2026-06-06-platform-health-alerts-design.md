@@ -122,11 +122,15 @@ Steps:
    for each (best-effort); stamp `notifiedAt=now` on the just-opened rows.
 7. Return `{ opened, resolved, stillOpen }`.
 
-**DRY refactor in `lib/data.ts`:** extract the stale-count / stuck-pending /
-inactive-tenants computation from `getPlatformHealth` into
-`export async function getAlertInputs(): Promise<{ staleCount: number;
-stuckPendingCount: number; inactiveTenants: { id: string; name: string }[] }>`,
-and have `getPlatformHealth` call it. Behaviour of the health page is unchanged.
+**`getAlertInputs()` in `lib/data.ts`:** a standalone, lean function returning
+`{ staleCount: number; stuckPendingCount: number; inactiveTenants: { id: string;
+name: string }[] }` for the cron path. It mirrors `getPlatformHealth`'s predicates,
+but `getPlatformHealth` is left **unchanged** — it needs richer display data
+(stale device rows, inactive tenants *with* `lastReceiptAt`), so having it call
+`getAlertInputs` would double-query or drop data. The real single source of truth
+for alert *rules* is the shared pure `computeAlerts` + thresholds in `lib/health.ts`,
+which both paths use — so the two query paths can't produce different alerts. The
+only duplication is three small count/list queries (accepted tradeoff).
 
 ---
 
