@@ -29,7 +29,8 @@ directly.
 - **No stores/devices/members resources** — receipts + usage only. Consumers resolve store/device
   IDs out-of-band for now.
 - **No per-key scopes/permissions** — every key grants full **read** access to its own org.
-- **No OpenAPI/Swagger page, no SDKs** — documentation is out of scope for v1.
+- **No hosted Swagger UI page and no generated SDKs** — but a machine-readable **OpenAPI 3.1
+  document IS in scope** (see "API documentation" below). Rendering it / shipping SDKs is deferred.
 - **No webhooks** — that is Part 2 (separate spec).
 - **No cross-org/platform-admin API** — keys are strictly single-org.
 
@@ -44,6 +45,7 @@ directly.
 | Money in responses | **Integer cents** (stable API contract), not the UI's dollar conversion |
 | Versioned base path | `/api/v1` |
 | Key management UI | New tenant page `/tenant/api`, owner/admin only |
+| API documentation | **OpenAPI 3.1**, committed `openapi.json`, served at `GET /api/v1/openapi.json` (no hosted Swagger UI in v1) |
 
 ## Data model
 
@@ -159,6 +161,26 @@ view-models (which emit display labels like "Jun 1" and dollar revenue). It reus
   last returned row's keyset as the next cursor.
 - Decoding validates shape and date parseability; a malformed cursor → 400 `invalid_cursor`.
 
+## API documentation (OpenAPI 3.1)
+
+- **Source artifact:** a committed `openapi.json` (repo root) — an OpenAPI **3.1** document, the
+  single source of truth, hand-authored. JSON (not YAML) so it imports directly and is served with
+  zero new dependencies (the codebase avoids extra bundled packages — see CLAUDE.md). It covers:
+  - `info` (title "Ditto Public API", version `1.0.0`), `servers` (`{BETTER_AUTH_URL}/api/v1`).
+  - `securitySchemes`: `bearerAuth` (HTTP bearer) applied globally.
+  - All three paths with parameters, and reusable `components.schemas`: `Receipt`, `ReceiptDetail`,
+    `Usage`, `ReceiptList` (data + `next_cursor`), and `Error` (`{ error: { code, message } }`).
+  - The documented query params (filters, `limit`, `cursor`) and the standard error responses
+    (400/401/403/404/429).
+- **Served at:** `GET /api/v1/openapi.json` (`app/api/v1/openapi.json/route.ts`) — **unauthenticated**
+  (the schema is public, contains no secrets), returns the imported document with
+  `Content-Type: application/json`. Lets consumers import the API by URL into Postman/Insomnia/Swagger
+  UI or run an SDK generator against it.
+- **Discoverability:** the `/tenant/api` page's "Using the API" blurb links to `GET /api/v1/openapi.json`.
+- **Kept honest:** a unit test (see Testing) asserts the document declares exactly the three implemented
+  paths and the `bearerAuth` scheme, so a drift between routes and spec fails CI. (Full request/response
+  conformance testing is deferred; the test is a structural guard, not a contract validator.)
+
 ## Internals
 
 - `lib/api/` — pure, IO-free, unit-tested helpers:
@@ -208,6 +230,9 @@ view-models (which emit display labels like "Jun 1" and dollar revenue). It reus
 - `lib/ids` (extend existing if present): `generateApiKey` format + `hashApiKey` determinism.
 - Auth/route guards verified by inspection (matches the device-auth precedent; the codebase does not
   DB-mock routes).
+- `openapi.test.ts`: the `openapi.json` document parses as OpenAPI 3.1, declares exactly the three
+  implemented paths (`/receipts`, `/receipts/{id}`, `/usage`) and a `bearerAuth` security scheme
+  (structural drift guard between routes and spec).
 - Manual: create a key in `/tenant/api`, `curl` all three endpoints against seeded data, confirm
   cursor paging walks the full set, a revoked key returns 403, and `/receipts/{id}` does NOT change
   receipt status.
@@ -221,7 +246,8 @@ view-models (which emit display labels like "Jun 1" and dollar revenue). It reus
 5. Routes: `/api/v1/receipts`, `/api/v1/receipts/[id]`, `/api/v1/usage`.
 6. `lib/actions/api-keys.ts` + `AUDIT` constants.
 7. `/tenant/api` page + dialog + nav entry.
-8. Tests + build; manual `curl` verification against seeded data.
+8. `openapi.json` document + `GET /api/v1/openapi.json` route + structural test; link it from `/tenant/api`.
+9. Tests + build; manual `curl` verification against seeded data (incl. importing `openapi.json` into a tool).
 
 No external accounts/keys required — fully account-free (reuses R2/Neon already configured).
 Webhooks (Part 2) will reuse this key/auth model and the resource shapes defined here.
