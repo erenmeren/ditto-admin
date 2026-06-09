@@ -58,31 +58,34 @@ interface KioskElement {
   builtin?: BuiltinId;   // present when kind === "builtin"
   text?: string;         // present when kind === "text"
   visible: boolean;
-  x: number; y: number;  // CENTER anchor, fraction 0..1 (unchanged meaning)
-  w: number; h: number;  // box size, fraction of the 720 canvas (replaces scale)
-  z: number;             // stacking order for overlapping elements
+  x: number; y: number;   // CENTER anchor, fraction 0..1 (unchanged meaning)
+  sx: number; sy: number; // size multipliers of the element's NATURAL size (1 = natural)
+  z: number;              // stacking order for overlapping elements
 }
 ```
 
 Rules:
 
-- **Storage stays fractional** (0..1). The responsive canvas, jsonb column,
-  presigned-URL flow, and normalize/validation infra are untouched. The UI
-  multiplies by 720 to show/edit pixels and divides on write.
+- **Position stays fractional** (0..1); **size is a unitless multiplier** of the
+  element's natural rendered size (`1,1` = natural). The responsive canvas, jsonb
+  column, presigned-URL flow, and normalize infra are untouched.
 - **`x,y` remain the element CENTER** (not top-left), matching today's math.
-- **`scale` → `w,h` migration:** a per-builtin `DEFAULT_BOX` table (fractions,
-  captured from today's natural rendering) × the legacy `scale`. Existing saved
-  layouts keep their look. Custom elements get a default box.
+- **Pixels are a UI projection, never stored.** The editor measures an element's
+  natural pixel size and reports `W = naturalPx × sx` (on the 720 reference); a
+  typed pixel value is converted back to a multiplier. X/Y px = `x×720`, `y×720`.
+- **`scale` → `sx,sy` migration is trivial:** legacy `scale` becomes
+  `sx = sy = scale`. Existing saved layouts keep their look with no measurement.
 - **`normalizeKioskLayout` reworked** for an open id set:
   - Built-ins reconciled against the 5 known ids (missing ones re-added, as today).
   - Unknown ids kept only if `kind:"text"` with a string `text`; otherwise dropped.
-  - `w,h` clamped to a sane range (floor ≈ 0.03, ceiling 1.0); `x,y` clamped so
-    the center stays in 0..1; `z` defaulted by array order.
-  - Legacy elements lacking `kind`/`w`/`h` are migrated (kind = builtin, box from
-    `DEFAULT_BOX × scale`).
-- Constants: replace `SCALE_MIN/SCALE_MAX` usage with box min/max; keep
-  `KIOSK_ELEMENT_LABEL` for built-ins and derive a label for custom text
-  (e.g. the text content, truncated, or "Text").
+    Custom text is capped (≤ 20) and each `text` trimmed to ≤ 80 chars.
+  - `sx,sy` clamped to `[SCALE_MIN, SCALE_MAX]` (0.2–6); `x,y` clamped to `[0,1]`;
+    `z` defaulted by array order.
+  - Legacy elements lacking `kind`/`sx`/`sy` are migrated (kind = builtin,
+    `sx = sy = scale ?? 1`).
+- Constants: keep `SCALE_MIN/SCALE_MAX` (re-purposed for the multiplier range);
+  keep `KIOSK_ELEMENT_LABEL` for built-ins and derive a label for custom text
+  (the text content truncated, or "Text").
 
 ## Section 2 — Editor UX (`kiosk-layout-editor.tsx`)
 
@@ -109,27 +112,25 @@ built-ins are only **hideable** (logo/clock can never be lost).
 
 ## Section 3 — Rendering (`kiosk-preview.tsx`)
 
-Approach 1's fit-to-content, shared by preview and editor.
+Approach 1's fit-to-content, shared by preview and editor. With the multiplier
+encoding, **rendering needs no measurement** — it is a plain CSS transform.
 
-- **`KioskElementView` becomes box-driven.** Each element is absolutely
-  positioned at its `{x,y}` center with pixel box `{w,h}`. Inside, the existing
-  visual (logo SVG, `KioskClock`, wi-fi bars, lane/tagline, or custom text)
-  renders at its **natural size** in a measuring wrapper, then gets
-  `transform: scaleX(w/naturalW) scaleY(h/naturalH)` with
-  `transform-origin: center`.
-- **Measurement hook `useNaturalSize`** — a `ref` + `useLayoutEffect` /
-  `ResizeObserver` reporting the content's natural pixel size within the
-  container. Natural size and box share the same container units, so the ratio is
-  resolution-independent — the canvas can be any width and it holds.
-- **First-render / default box** — when an element has no stored box (brand-new
-  custom element, or a built-in being seeded), measure natural size once and
-  write it back as the box, so "scale 1" == natural. Thereafter the stored box is
-  the source of truth.
+- **`KioskElementView` becomes multiplier-driven.** Each element is absolutely
+  positioned at its `{x,y}` center; the existing visual (logo SVG, `KioskClock`,
+  wi-fi bars, lane/tagline, or custom text) renders at its **natural size**
+  inside a wrapper with `transform: scale(sx, sy)` and
+  `transform-origin: center`. `sx=sy=1` → natural, no distortion. `sx≠sy` →
+  free-stretch (text distorts, intended).
+- **No measurement at render time.** Because size is a multiplier of natural,
+  the transform fully expresses it. Measurement is confined to the **editor**,
+  and only for two things: projecting natural→pixels for the number inputs, and
+  reading the visual rect during a handle drag (both via
+  `getBoundingClientRect` / `offsetWidth` against the canvas).
 - **Custom text** renders with the kiosk font, `--k-fg` color, centered,
-  `white-space: pre` so the box is the wrap authority (stretching the box changes
-  it, matching the free-stretch model).
-- The editor reuses this exact view; handles are an overlay around the box, so
-  what you drag is pixel-identical to what renders on the real kiosk.
+  `white-space: pre`, scaled by `sx,sy` (stretching distorts it like a Word text
+  box, matching the free-stretch model).
+- The editor reuses this exact view; handles are an overlay around the element's
+  visual rect, so what you drag is pixel-identical to what renders on the kiosk.
 
 ## Section 4 — Persistence, edge cases, testing
 
@@ -145,15 +146,16 @@ Approach 1's fit-to-content, shared by preview and editor.
   - Pointer-capture cleanup on `pointerup` / `pointerleave` (as today).
   - Read-only preview never shows handles / selection.
   - `z`-order ties broken by array index.
-- **Testing** (extends `lib/kiosk-layout.test.ts`):
-  - Migration of a legacy `scale`-only layout → correct `w,h`.
-  - Round-trip normalize of a custom text element.
-  - Unknown / garbage element dropped.
-  - Box clamping (floor/ceiling, off-canvas center).
+- **Testing** (`lib/kiosk-layout.test.ts` + new `lib/kiosk-geometry.test.ts`):
+  - Migration of a legacy `scale`-only layout → `sx = sy = scale`.
+  - Round-trip normalize of a custom text element (kept, clamped, capped, trimmed).
+  - Unknown / garbage element dropped; unknown built-in id dropped.
+  - Multiplier clamping (`SCALE_MIN/MAX`) and `x,y` clamping.
   - Missing built-in re-added.
-  - Live verification of measurement + handle drag/stretch via the
-    Playwright/browse tooling against the running editor (same as today's drag
-    verification).
+  - Pure `resizeBox` geometry: corner keeps aspect, edge stretches one axis,
+    opposite anchor fixed, min-size floor, off-canvas clamp.
+  - Live verification of handle drag/stretch + px inputs via the Playwright/browse
+    tooling against the running editor (same as today's drag verification).
 
 ## Out of scope (YAGNI)
 
