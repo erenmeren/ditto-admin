@@ -34,7 +34,7 @@
 
 ```ts
 import { describe, it, expect } from "vitest";
-import { resizeBox, snapMove, snapResize, MIN_BOX, type Box } from "./kiosk-geometry";
+import { resizeBox, snapMove, snapResize, clampToCanvas, MIN_BOX, type Box } from "./kiosk-geometry";
 
 const box: Box = { x: 0.4, y: 0.45, w: 0.2, h: 0.1 }; // edges L0.4 R0.6 T0.45 B0.55
 
@@ -60,6 +60,18 @@ describe("resizeBox (top-left box)", () => {
     expect(r.w).toBeGreaterThanOrEqual(MIN_BOX);
     expect(r.x).toBeCloseTo(0.4, 6);
   });
+  it("north edge dragged past the bottom floors height and re-anchors top", () => {
+    const r = resizeBox(box, "n", { x: 0.5, y: 0.9 }); // bottom is 0.55
+    expect(r.h).toBe(MIN_BOX);
+    expect(r.y).toBeCloseTo(0.55 - MIN_BOX, 6); // re-anchored to bottom - MIN_BOX
+  });
+  it("nw corner dragged past se floors BOTH axes and re-anchors to the se corner", () => {
+    const r = resizeBox(box, "nw", { x: 0.99, y: 0.99 }); // right 0.6, bottom 0.55
+    expect(r.w).toBe(MIN_BOX);
+    expect(r.h).toBe(MIN_BOX);
+    expect(r.x).toBeCloseTo(0.6 - MIN_BOX, 6);
+    expect(r.y).toBeCloseTo(0.55 - MIN_BOX, 6);
+  });
 });
 
 describe("snapMove", () => {
@@ -83,6 +95,12 @@ describe("snapMove", () => {
     expect(guides.vx).toHaveLength(0);
     expect(guides.hy).toHaveLength(0);
   });
+  it("snaps the top edge to the canvas top and reports a horizontal guide", () => {
+    const moving: Box = { x: 0.5, y: 0.01, w: 0.1, h: 0.1 }; // top near 0
+    const { box: r, guides } = snapMove(moving, [], 0.02);
+    expect(r.y).toBeCloseTo(0, 6);
+    expect(guides.hy).toContain(0);
+  });
 });
 
 describe("snapResize", () => {
@@ -98,6 +116,31 @@ describe("snapResize", () => {
     expect(r.x).toBeCloseTo(0.2, 6);
     expect(r.y).toBeCloseTo(0.2, 6);
     expect(r.h).toBeCloseTo(0.6, 6);
+  });
+  it("snaps the south edge to the canvas bottom", () => {
+    const b: Box = { x: 0.2, y: 0.2, w: 0.2, h: 0.78 }; // bottom 0.98, near 1
+    const { box: r, guides } = snapResize(b, "s", [], 0.03);
+    expect(r.y + r.h).toBeCloseTo(1, 6);
+    expect(guides.hy).toContain(1);
+  });
+  it("does NOT report a guide when MIN_BOX overrides the snap", () => {
+    // east drag on a tiny box: right 0.53 snaps toward 0.5, but that collapses
+    // width below MIN_BOX, so the edge is pushed back out — no honest guide.
+    const b: Box = { x: 0.49, y: 0.2, w: 0.04, h: 0.2 };
+    const { box: r, guides } = snapResize(b, "e", [], 0.04);
+    expect(r.w).toBeGreaterThanOrEqual(MIN_BOX);
+    expect(guides.vx).toHaveLength(0);
+  });
+});
+
+describe("clampToCanvas", () => {
+  it("pulls a box back onto the canvas", () => {
+    expect(clampToCanvas({ x: 0.9, y: 0.95, w: 0.3, h: 0.2 })).toMatchObject({ x: 0.7, y: 0.8 });
+  });
+  it("clamps an oversized box and floors a tiny one", () => {
+    const big = clampToCanvas({ x: -1, y: -1, w: 5, h: 5 });
+    expect(big).toMatchObject({ x: 0, y: 0, w: 1, h: 1 });
+    expect(clampToCanvas({ x: 0.5, y: 0.5, w: 0, h: 0 }).w).toBe(MIN_BOX);
   });
 });
 ```
@@ -133,6 +176,9 @@ export interface Guides {
 /** Minimum box size as a fraction of the canvas — keeps objects grabbable. */
 export const MIN_BOX = 0.04;
 
+/** Distance tie-break epsilon for snapping (ignore sub-nanometer float noise). */
+const SNAP_EPS = 1e-9;
+
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 /**
@@ -151,12 +197,20 @@ export function resizeBox(box: Box, handle: Handle, pointer: { x: number; y: num
   const movesS = handle.includes("s");
   const movesN = handle.includes("n");
 
-  if (movesE) right = Math.max(left + MIN_BOX, pointer.x);
-  if (movesW) left = Math.min(right - MIN_BOX, pointer.x);
-  if (movesS) bottom = Math.max(top + MIN_BOX, pointer.y);
-  if (movesN) top = Math.min(bottom - MIN_BOX, pointer.y);
+  if (movesE) right = pointer.x;
+  if (movesW) left = pointer.x;
+  if (movesS) bottom = pointer.y;
+  if (movesN) top = pointer.y;
 
-  return { x: left, y: top, w: right - left, h: bottom - top };
+  // Enforce the MIN_BOX floor by setting the dimension exactly and re-anchoring
+  // the moving edge — avoids floating-point underflow from re-subtraction
+  // (e.g. (0.4 + 0.04) - 0.4 = 0.03999…).
+  let w = right - left;
+  let h = bottom - top;
+  if (w < MIN_BOX) { w = MIN_BOX; if (movesW) left = right - MIN_BOX; else right = left + MIN_BOX; }
+  if (h < MIN_BOX) { h = MIN_BOX; if (movesN) top = bottom - MIN_BOX; else bottom = top + MIN_BOX; }
+
+  return { x: left, y: top, w, h };
 }
 
 /** Canvas + other-object snap targets along each axis. */
@@ -177,7 +231,9 @@ function bestSnap(probes: number[], targets: number[], threshold: number): { del
   for (const p of probes) {
     for (const t of targets) {
       const dist = Math.abs(t - p);
-      if (dist <= threshold && (!best || dist < best.dist)) best = { delta: t - p, line: t, dist };
+      // SNAP_EPS tie-break: keep the earlier probe (left/top before center before
+      // right/bottom) on near-equal distances, so floating-point noise can't flip it.
+      if (dist <= threshold && (!best || dist < best.dist - SNAP_EPS)) best = { delta: t - p, line: t, dist };
     }
   }
   return best ? { delta: best.delta, line: best.line } : null;
@@ -188,7 +244,7 @@ function snapValue(value: number, targets: number[], threshold: number): number 
   let best: { v: number; dist: number } | null = null;
   for (const t of targets) {
     const dist = Math.abs(t - value);
-    if (dist <= threshold && (!best || dist < best.dist)) best = { v: t, dist };
+    if (dist <= threshold && (!best || dist < best.dist - SNAP_EPS)) best = { v: t, dist };
   }
   return best ? best.v : null;
 }
@@ -216,18 +272,31 @@ export function snapResize(box: Box, handle: Handle, others: Box[], threshold: n
   let top = box.y;
   let right = box.x + box.w;
   let bottom = box.y + box.h;
-  const vx: number[] = [];
-  const hy: number[] = [];
   const tx = targetsX(others);
   const ty = targetsY(others);
 
-  if (handle.includes("e")) { const s = snapValue(right, tx, threshold); if (s != null) { right = s; vx.push(s); } }
-  if (handle.includes("w")) { const s = snapValue(left, tx, threshold); if (s != null) { left = s; vx.push(s); } }
-  if (handle.includes("s")) { const s = snapValue(bottom, ty, threshold); if (s != null) { bottom = s; hy.push(s); } }
-  if (handle.includes("n")) { const s = snapValue(top, ty, threshold); if (s != null) { top = s; hy.push(s); } }
+  // Snap the dragged edges...
+  const sE = handle.includes("e") ? snapValue(right, tx, threshold) : null;
+  const sW = handle.includes("w") ? snapValue(left, tx, threshold) : null;
+  const sS = handle.includes("s") ? snapValue(bottom, ty, threshold) : null;
+  const sN = handle.includes("n") ? snapValue(top, ty, threshold) : null;
+  if (sE != null) right = sE;
+  if (sW != null) left = sW;
+  if (sS != null) bottom = sS;
+  if (sN != null) top = sN;
 
+  // ...then enforce the MIN_BOX floor (which may override a snap).
   if (right - left < MIN_BOX) { if (handle.includes("w")) left = right - MIN_BOX; else right = left + MIN_BOX; }
   if (bottom - top < MIN_BOX) { if (handle.includes("n")) top = bottom - MIN_BOX; else bottom = top + MIN_BOX; }
+
+  // Emit a guide only for snaps that actually held after MIN_BOX recovery, so a
+  // guide line never lies about where an edge sits.
+  const vx: number[] = [];
+  const hy: number[] = [];
+  if (sE != null && Math.abs(right - sE) < SNAP_EPS) vx.push(sE);
+  if (sW != null && Math.abs(left - sW) < SNAP_EPS) vx.push(sW);
+  if (sS != null && Math.abs(bottom - sS) < SNAP_EPS) hy.push(sS);
+  if (sN != null && Math.abs(top - sN) < SNAP_EPS) hy.push(sN);
 
   return { box: { x: left, y: top, w: right - left, h: bottom - top }, guides: { vx, hy } };
 }
@@ -690,9 +759,11 @@ function LogoObject({ object, brand }: { object: KioskObject; brand: KioskBrand 
       <img src={brand.logoUrl} alt={brand.logoText} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
     );
   }
-  const size = Math.min(object.w, object.h) * 720; // contain within the box
+  // Height-driven so the stacked mark + wordmark fits the box; overflow clipped
+  // so an undersized box never lets the logo overlap neighbouring objects.
+  const size = object.h * 720 * 0.55;
   return (
-    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
       <Logo brand={brand} size={size} stacked />
     </div>
   );
@@ -825,7 +896,9 @@ export function useKioskEditor({
 
   function pointerFrac(e: React.PointerEvent): { x: number; y: number } {
     const r = canvasRef.current!.getBoundingClientRect();
-    return { x: clamp((e.clientX - r.left) / r.width, 0, 1), y: clamp((e.clientY - r.top) / r.height, 0, 1) };
+    const w = r.width || 1; // guard against a zero-sized canvas producing NaN
+    const h = r.height || 1;
+    return { x: clamp((e.clientX - r.left) / w, 0, 1), y: clamp((e.clientY - r.top) / h, 0, 1) };
   }
 
   function others(excludeId: string): Box[] {
@@ -1047,9 +1120,9 @@ function SelectionOverlay({
 }
 
 const HANDLE_POS: Record<Handle, string> = {
-  nw: "left-0 top-0", n: "left-1/2 top-0", ne: "right-0 top-0",
-  e: "right-0 top-1/2", se: "right-0 bottom-0", s: "left-1/2 bottom-0",
-  sw: "left-0 bottom-0", w: "left-0 top-1/2",
+  nw: "left-0 top-0", n: "left-1/2 top-0", ne: "left-full top-0",
+  e: "left-full top-1/2", se: "left-full top-full", s: "left-1/2 top-full",
+  sw: "left-0 top-full", w: "left-0 top-1/2",
 };
 const HANDLE_CURSOR: Record<Handle, string> = {
   nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize",
