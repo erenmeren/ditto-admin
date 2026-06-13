@@ -2,7 +2,7 @@
 
 # Ditto Admin
 
-Multi-tenant admin console for **Ditto**, a digital-receipt SaaS. Kiosks replace
+Multi-tenant admin console for **Ditto**, a digital-receipt SaaS. Printers replace
 paper receipts with a QR code customers scan to download a digital receipt.
 
 ## Stack
