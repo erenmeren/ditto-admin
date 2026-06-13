@@ -105,6 +105,6 @@ App tables (all FK → `organizationId`): `tenantSettings` (PK=orgId), `store`,
 
 ## Seed accounts (`npm run db:seed`)
 
-- Platform admin: **admin@ditto.app** / `password123`
-- Tenant owner: **dana@roastwell.co** / `password123`
+- Platform admin: **admin@ditto.app** / `123456`
+- Tenant owner: **dana@roastwell.co** / `123456`
 - Org "Roastwell Coffee": 3 stores, 6 devices (mixed status), 30 receipts, 2 invoices.
