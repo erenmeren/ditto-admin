@@ -106,6 +106,10 @@ ditto-firmware/
   - `GS V` cut (treated as receipt boundary / end-of-job).
   - **Unknown/unsupported commands:** consumed per length rules and skipped (logged),
     never crash the parser. Robustness over completeness.
+  - **Priority within M4:** harden **`GS v 0` raster bit-image** and **QR (`GS ( k`)**
+    first — they are the most common paths in real POS receipts and the most likely to
+    expose renderer edge cases (raster alignment/scaling, QR module rendering). Build the
+    fixture suite around these two before the text-styling polish.
 - **Intermediate representation — draw-ops:** parser emits ops like
   `{drawText, font, style, align}`, `{drawRaster, w, h, bits}`, `{drawBarcode/QR, data}`,
   `{feed, dots}`, `{cut}`. The renderer consumes ops; both sides are fixture-testable
