@@ -301,9 +301,11 @@ Update `BUILD.md` to state IDF **5.5** as the toolchain (supersedes the 5.4.4 no
 
 ---
 
-### Task 7 (follow-up, out of primary scope): re-evaluate touch on 5.5
+### Task 7 (follow-up, out of primary scope): re-evaluate touch on 5.5 — ✅ DONE
 
 The GT911 touch was skipped (I2C busy-wait) in the 5.4.4 bring-up. On 5.5 with the corrected component versions, re-test: temporarily revert the touch-skip in `tools/patch-deps.sh`, rebuild, and read the log — if the GT911 I2C no longer hangs, drop the touch-skip patch and tap-to-ingest works again. If it still hangs, leave the skip and treat touch as its own milestone. **Do not block M-Wi-Fi completion on touch.**
+
+**Result (2026-06-15):** GT911 inits cleanly on IDF 5.5 — no I2C hang (`GT911: TouchPad_ID:0x39,0x31,0x31`, `GT911 touch init OK`, only a non-fatal pull-up warning). Verified functionally on hardware: a screen tap registers, fires `run_test_ingest()` → `POST /ingest -> 201` → receipt. Touch-skip block removed from `tools/patch-deps.sh` (firmware commit, merged to `main`). **M-Wi-Fi plan fully complete.**
 
 ---
 
