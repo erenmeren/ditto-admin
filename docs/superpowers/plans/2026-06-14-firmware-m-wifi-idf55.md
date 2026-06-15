@@ -263,30 +263,32 @@ git commit -m "feat(firmware): re-enable networking — C6 SDIO Wi-Fi associatio
 **Files:**
 - Modify: (via `idf.py menuconfig`) `DITTO_API_BASE_URL`, `DITTO_DEVICE_KEY`
 
-- [ ] **Step 1: Obtain a device key from ditto-admin**
+- [x] **Step 1: Obtain a device key from ditto-admin** — provisioned via admin "Add device" (pairing code) + tenant "Claim printer" (raw key `dvk_…`, shown once). Prod URL `https://ditto-admin-brown.vercel.app`.
 
 In `ditto-admin`: `npm run db:seed`, then claim a device in the admin UI (the raw 40-char key shows once) — or insert a `device` row with `device_key_hash` = SHA-256 of a chosen key. Note the org's base URL (the production Vercel URL).
 
-- [ ] **Step 2: Configure cloud endpoint + key**
+- [x] **Step 2: Configure cloud endpoint + key** — set `DITTO_API_BASE_URL` + `DITTO_DEVICE_KEY` in gitignored `sdkconfig`, rebuilt + flashed.
 
 ```bash
 idf.py menuconfig    # Ditto firmware (dev) -> DITTO_API_BASE_URL (prod URL) + DITTO_DEVICE_KEY (raw key)
 idf.py build && idf.py -p <PORT> flash
 ```
 
-- [ ] **Step 3: Verify the device reaches the cloud (passive serial + admin UI)**
+- [x] **Step 3: Verify the device reaches the cloud (passive serial + admin UI)** — ✅ `cloud: GET /commands -> 200`; device shows **online** in admin (poll = heartbeat: lastSeenAt + status + fw version). Config fetch is event-driven (on `config-changed`/"Refresh config"), not every poll.
 
 Expected (serial):
 - `cloud: GET /commands -> 200, body: {"commands":[...]}`.
 - `cloud: config updated (N texts)` (the `GET /api/device/config` fetch) — and the **idle screen repaints** with the org's branding.
 Expected (admin UI): the device shows **online** with `firmwareVersion` from `DITTO_FW_VERSION`.
 
-- [ ] **Step 4: Verify command + receipt round-trips**
+- [x] **Step 4: Verify command + receipt round-trips** — ✅ both. `identify` → admin shows **acked**. Receipt ingest end-to-end: streamed `text-receipt.escpos` to `:9100` → `parsed 24 ops` → `rendered 576x438 -> PNG 252809 bytes` → `POST /ingest -> 201` (token+URL) → public receipt page resolves HTTP 200 with the Roastwell receipt + presigned R2 image.
 
 - Enqueue an `identify` command in the admin → within a poll cycle the device acks it (status `acked` in admin) and the status dot blinks.
 - Stream a receipt fixture to the device (`tools/escpos-harness/`): `node make-text-fixture.js && node send.js <device-ip> fixtures/text-receipt.escpos` → device renders + uploads → QR screen → scanning resolves the public receipt; the receipt appears in the admin.
 
-**Success criteria:** device is **online** in the admin, fetches its config (idle screen reflects branding), acks a command, and completes a receipt ingest end-to-end over Wi-Fi → cloud.
+> **LAN gotcha:** the ESC/POS sender must be on the **same subnet** as the device (it's a raw TCP push to `:9100`). The Mac is on `192.168.0.x`; `test_EXT` lands the device there (`192.168.0.104`), `kunteper` lands it on `10.193.170.x` (unreachable from the Mac). `/tmp/ingest_test.py` resets the board, rediscovers the IP, streams the fixture, and captures render/upload on serial in one shot.
+
+**Success criteria:** device is **online** in the admin, fetches its config (idle screen reflects branding), acks a command, and completes a receipt ingest end-to-end over Wi-Fi → cloud. ✅ **MET** (online + identify acked + ingest 201 + public receipt 200).
 **Rollback:** Wi-Fi + display work even if cloud creds are wrong (poll just 401/errors without crashing). Fix the base URL / device key and reflash; no firmware rollback needed.
 
 - [ ] **Step 5: Document + commit the working full-stack state**
