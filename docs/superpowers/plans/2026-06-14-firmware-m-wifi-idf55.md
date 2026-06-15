@@ -202,7 +202,7 @@ git commit -m "feat(firmware): select C6 SDIO transport on IDF 5.5 (slave-select
 - Modify: `main/app_main.c` (remove the `#if 0` networking guard)
 - Modify: (via `idf.py menuconfig`) dev Wi-Fi credentials
 
-- [ ] **Step 1: Re-enable the networking block**
+- [x] **Step 1: Re-enable the networking block** — `#if 0` guard removed, live calls restored.
 
 In `main/app_main.c`, remove the `#if 0` / `#endif` around the networking block (restore the live calls), and drop the "display bring-up mode" log. The block becomes:
 ```c
@@ -219,21 +219,21 @@ In `main/app_main.c`, remove the `#if 0` / `#endif` around the networking block 
     ESP_LOGI(TAG, "print server up on :9100");
 ```
 
-- [ ] **Step 2: Set real Wi-Fi credentials**
+- [x] **Step 2: Set real Wi-Fi credentials** — set directly in gitignored `sdkconfig` (menuconfig is interactive; the build picks them up). Tested on two 2.4GHz APs.
 
 ```bash
 idf.py menuconfig    # Ditto firmware (dev) -> DITTO_WIFI_SSID + DITTO_WIFI_PASSWORD
 ```
 (Use a 2.4GHz-capable network the C6 can join.)
 
-- [ ] **Step 3: Build + flash**
+- [x] **Step 3: Build + flash** — built on IDF 5.5.4, flashed via `/dev/cu.usbmodem5A671704091`.
 
 ```bash
 idf.py build && ./tools/patch-deps.sh && idf.py build
 ls /dev/cu.usbmodem* ; idf.py -p <PORT> flash
 ```
 
-- [ ] **Step 4: Verify SDIO init + association (passive serial read)**
+- [x] **Step 4: Verify SDIO init + association (passive serial read)** — ✅ all expected markers seen: `Identified slave [esp32c6]`, `Card init success`, `net: got IP`, `ditto: Wi-Fi connected=1`, sustained cloud polls (404 on placeholder URL = Task 6). See the stability note below — getting here required two additional fixes beyond the plan.
 
 Read the boot log (Appendix). Expected, in order:
 - `Ditto firmware boot`, `Idle screen shown` (display still up — dot grey initially).
@@ -242,10 +242,14 @@ Read the boot log (Appendix). Expected, in order:
 - `ditto: Wi-Fi connected=1`.
 - The idle-screen status dot turns **green** (`ui_set_online(true)` once the poll succeeds).
 
-**Success criteria:** device brings up the C6 over SDIO without crashing and obtains an IP (`got IP`, `connected=1`); 1 boot banner, no WDT/abort.
+**Success criteria:** device brings up the C6 over SDIO without crashing and obtains an IP (`got IP`, `connected=1`); 1 boot banner, no WDT/abort. ✅ **MET** (stable, 0 reboots over 30s+ with sustained polling).
 **Rollback:** if SDIO init crashes or never associates, re-wrap networking in `#if 0`, rebuild/flash → back to the working display-only build on 5.5. Capture the failing serial log first (SDIO timeout vs association failure vs auth failure) — that pinpoints pins/firmware vs credentials.
 
-- [ ] **Step 5: Commit**
+> **⚠️ Two fixes beyond the plan were required to reach a STABLE link (see commits + `firmware-m-wifi-idf55-status` memory):**
+> 1. **C6 slave firmware was stale.** The board shipped the C6 with esp_hosted slave fw v0.0.6 (reports `0.0.0`) vs host 2.12.9. Updated it to 2.12.9 via host-driven **LittleFS slave-OTA over SDIO** (built `~/Projects/ditto-c6-slave`, pushed with `~/Projects/ditto-c6-ota`). Necessary, but did NOT fix stability on its own.
+> 2. **SDIO mempool placement.** The real instability (`H_SDIO_DRV: Failed to send data: 258` → `Unrecoverable host sdio state` → restart loop, only under active RF) was the transport mempool living in **PSRAM** (`MEMPOOL_PREFER_SPIRAM`, added in Task 3 to dodge a boot OOM). PSRAM-DMA is unreliable for SDIO under RF; **internal DMA RAM is stable** (proven vs the brookesia demo). Fix: drop `MEMPOOL_PREFER_SPIRAM` + shrink `ESP_HOSTED_SDIO_TX/RX_Q_SIZE` to 6 so the ~26KB pool fits in internal RAM. The earlier 20MHz SDIO clock drop was a red herring (reverted to 40MHz).
+
+- [x] **Step 5: Commit** — committed on `m-wifi-idf55`: networking re-enable + disconnect-reason logging, then the SDIO stability fix.
 
 ```bash
 git add main/app_main.c
