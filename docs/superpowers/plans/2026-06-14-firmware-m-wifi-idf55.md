@@ -33,7 +33,7 @@ Check these before/while building Stage 2; each has a likely fix:
 
 **Files:** (git only)
 
-- [ ] **Step 1: Confirm the working baseline**
+- [x] **Step 1: Confirm the working baseline** — clean tree on `main` at `767597a` (display-only).
 
 ```bash
 cd ~/Projects/ditto-firmware
@@ -42,13 +42,13 @@ git log --oneline -1          # expect the display-only commit (767597a-ish)
 ```
 Expected: clean tree on `main`, last commit is the stable display-only state.
 
-- [ ] **Step 2: Create the migration branch**
+- [x] **Step 2: Create the migration branch** — on `m-wifi-idf55`.
 
 ```bash
 git checkout -b m-wifi-idf55
 ```
 
-- [ ] **Step 3: Commit a marker (so rollback is one command)**
+- [x] **Step 3: Commit a marker (so rollback is one command)** — marker `9b825be`, `main` untouched.
 
 ```bash
 git commit --allow-empty -m "chore: start M-Wi-Fi (IDF 5.5 migration) from working 5.4.4 display-only build"
@@ -93,7 +93,7 @@ This re-validates the display BEFORE networking is reintroduced. Networking stay
 **Files:**
 - Modify: `tools/patch-deps.sh` (only if a new managed-component break appears)
 
-- [ ] **Step 1: Clean everything (force fresh dependency resolution for 5.5)**
+- [x] **Step 1: Clean everything (force fresh dependency resolution for 5.5)** — done on IDF v5.5.4.
 
 ```bash
 cd ~/Projects/ditto-firmware
@@ -102,7 +102,7 @@ rm -rf build managed_components dependencies.lock sdkconfig
 idf.py set-target esp32p4
 ```
 
-- [ ] **Step 2: First build (re-fetches managed components for 5.5)**
+- [x] **Step 2: First build (re-fetches managed components for 5.5)** — components re-fetched; existing patch-deps anchors all matched (WIFI_RMT + BSP touch-skip applied).
 
 ```bash
 idf.py build
@@ -111,7 +111,7 @@ Expected outcomes:
 - If it fails fetching/compiling a vendored component (BSP/ST7703/esp_lvgl_port) with a 5.5 API error, that's an expected migration break — go to Step 3.
 - If `esp_wifi_remote`'s `WIFI_RMT_*` undeclared error appears (in `net.c`), run `./tools/patch-deps.sh` then rebuild.
 
-- [ ] **Step 3: Apply managed-component patches + reconcile API breaks**
+- [x] **Step 3: Apply managed-component patches + reconcile API breaks** — NO esp_lcd/ST7703/BSP API break occurred. One unanticipated break: 5.5 bootloader grew to `0x60c0` > the `0x6000` gap; fixed via `CONFIG_PARTITION_TABLE_OFFSET=0xA000` in `sdkconfig.defaults` (table→0xA000, app→0x20000; partitions.csv uses no absolute offsets so no collision).
 
 ```bash
 ./tools/patch-deps.sh        # re-applies touch-skip + WIFI_RMT (no-ops if not needed on 5.5)
@@ -119,14 +119,14 @@ idf.py build
 ```
 If a vendored file fails on a removed/renamed `esp_lcd` field (e.g. another `color_space`/`pixel_format`-class change), patch it in `managed_components/...` AND add the patch to `tools/patch-deps.sh` (so it survives re-fetch), mirroring the existing entries. Rebuild until clean.
 
-- [ ] **Step 4: Verify a clean build**
+- [x] **Step 4: Verify a clean build** — `Project build complete.` (app 0x121fe0, 43% free), no `error:`/`FAILED`.
 
 ```bash
 idf.py build 2>&1 | grep -E "Project build complete|error:|FAILED"
 ```
 Expected: `Project build complete.`
 
-- [ ] **Step 5: Flash + verify the display still renders on 5.5**
+- [x] **Step 5: Flash + verify the display still renders on 5.5** — confirmed on hardware: green "Ditto / Ready" idle screen renders, identical to 5.4.4.
 
 ```bash
 ls /dev/cu.usbmodem*                       # note the port
@@ -138,7 +138,7 @@ Expected: serial shows `Ditto firmware boot`, `touch disabled`, `Idle screen sho
 **Success criteria:** display-only firmware builds + boots + renders the idle screen on IDF 5.5, identical to the 5.4.4 behavior.
 **Rollback:** if display regresses on 5.5 and can't be fixed quickly, `git checkout main` + reflash on 5.4.4 (display-only stays shippable). Record the 5.5 display break before reverting.
 
-- [ ] **Step 6: Commit the 5.5-clean display build**
+- [x] **Step 6: Commit the 5.5-clean display build** — `7ddc72e` (combined with Task 4: C6 config was already committed at `767597a`, so the only new files were the partition-offset fix + `read-console.py`).
 
 ```bash
 git add -A
@@ -155,7 +155,7 @@ Networking remains `#if 0`; this task only proves the **config** resolves to SDI
 - Modify: `main/idf_component.yml`
 - Modify: `sdkconfig.defaults`
 
-- [ ] **Step 1: Confirm the pre-staged config is intact**
+- [x] **Step 1: Confirm the pre-staged config is intact** — `esp_wifi_remote: "0.*"`, no explicit esp_hosted, `CONFIG_SLAVE_IDF_TARGET_ESP32C6=y` + display options all present.
 
 `main/idf_component.yml` should already pin `espressif/esp_wifi_remote: "0.*"` and have **no** explicit `espressif/esp_hosted` (esp_wifi_remote pulls it). `sdkconfig.defaults` should already contain:
 ```
@@ -167,7 +167,7 @@ CONFIG_BSP_DISPLAY_LVGL_DIRECT_MODE=y
 ```
 If `esp_wifi_remote 0.*` resolves poorly on 5.5, match the brookesia demo exactly (it used `esp_wifi_remote: "0.*"` on 5.5) — keep `0.*`.
 
-- [ ] **Step 2: Regenerate sdkconfig + build**
+- [x] **Step 2: Regenerate sdkconfig + build** — regenerated from defaults; `Project build complete.` (no WIFI_RMT error on 5.5).
 
 ```bash
 rm -f sdkconfig dependencies.lock
@@ -175,7 +175,7 @@ idf.py set-target esp32p4
 idf.py build      # run ./tools/patch-deps.sh + rebuild if WIFI_RMT error appears
 ```
 
-- [ ] **Step 3: VALIDATE the slave-select + transport in the generated sdkconfig**
+- [x] **Step 3: VALIDATE the slave-select + transport in the generated sdkconfig** — ✅ PASS. Present: `SLAVE_IDF_TARGET_ESP32C6`, `ESP_HOSTED_CP_TARGET_ESP32C6`, `ESP_HOSTED_SDIO_HOST_INTERFACE`. Absent: SPI host iface + H2 target. SDIO pins defined (CLK18/CMD19/D0-3=14-17, slot1, 40MHz, reset GPIO54).
 
 ```bash
 grep -E "CONFIG_SLAVE_IDF_TARGET_ESP32C6=y|CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y|CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y" sdkconfig
@@ -187,7 +187,7 @@ Expected: the **first** grep prints all three lines; the **second** prints nothi
 **Success criteria:** generated `sdkconfig` selects `SLAVE_IDF_TARGET_ESP32C6` + `ESP_HOSTED_CP_TARGET_ESP32C6` + `ESP_HOSTED_SDIO_HOST_INTERFACE`; no SPI/H2 fallback.
 **Rollback:** config-only stage; revert `sdkconfig.defaults`/`idf_component.yml` edits if it won't resolve, firmware still display-only.
 
-- [ ] **Step 4: Commit the validated SDIO config**
+- [x] **Step 4: Commit the validated SDIO config** — folded into `7ddc72e` (no separate file change: `idf_component.yml` + the C6 line in `sdkconfig.defaults` were already committed at `767597a`).
 
 ```bash
 git add main/idf_component.yml sdkconfig.defaults
