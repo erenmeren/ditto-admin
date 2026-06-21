@@ -1,6 +1,16 @@
 # Ditto Admin — Product Roadmap
 
-_Last updated: 2026-06-01_
+_Last updated: 2026-06-21_
+
+> **Shipped 2026-06-21 — Device Settings (cloud + firmware).** Org-wide device
+> policies — QR-code visible duration, screen brightness, screen sleep/wake +
+> inactivity timeout, and an on-device Settings PIN — set in the tenant console
+> under Branding (`/tenant/device-settings`), stored in `tenant_settings`,
+> delivered to every device via `/api/device/config` (ETag-versioned) and a
+> `config-changed` broadcast. Deployed to production. The device now honors them
+> (ditto-firmware **M7**: brightness→backlight, screen sleep with wake-on-touch/
+> receipt, long-press SHA-256-PIN-gated Settings menu) — merged, flashed, and
+> HW-verified. See Phase 2 → Device below.
 
 ## Context
 
@@ -93,7 +103,10 @@ Invoices currently generate (`draft` / `sent` / `paid`) but nothing collects.
   invites (the org plugin already supports membership), per-store analytics
 - **Platform admin** — tenant health dashboard, usage-based alerts, fleet-wide
   status views
-- **Device** — remote pause/reboot, firmware/version tracking, offline detection
+- **Device** — remote pause/reboot, firmware/version tracking, offline detection.
+  ✅ **Device Settings shipped 2026-06-21** — org-wide brightness, screen
+  sleep/wake, QR-visible duration, and an on-device Settings PIN, configured in
+  the tenant console and honored on-device (firmware M7).
 
 ---
 
