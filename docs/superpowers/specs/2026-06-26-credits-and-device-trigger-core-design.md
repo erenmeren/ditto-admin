@@ -3,10 +3,11 @@
 **Date:** 2026-06-26
 **Repo:** `ditto-admin` (cloud only — firmware is Spec B)
 **Status:** Approved architecture, design pre-implementation
-**Part of:** "Public device-trigger API" feature. This is **Spec A** of three:
-- **A (this doc):** credits balance + ledger + reserve/settle/release, API-key scopes, the trigger endpoint, device-command payload + ack + TTL cron, admin grant, analytics. Cloud-only; testable with a simulated device ack.
+**Part of:** "Public device-trigger API" feature. This is **Spec A**, with one firmware follow-up:
+- **A (this doc):** credits balance + ledger + reserve/settle/release, API-key scopes, the trigger endpoint, device-command payload + ack + TTL cron, admin grant, **self-serve Stripe credit-pack purchase**, and analytics. Cloud-only; testable with a simulated device ack.
 - **B (follow-up):** firmware executes `show_qr` (renders a QR of the URL) and acks the command. Separate repo + HIL.
-- **C (follow-up):** self-serve Stripe credit-pack purchase → ledger `purchase`. Depends on finishing Stripe webhook wiring (`STRIPE_WEBHOOK_SECRET` is currently a placeholder).
+
+**Stripe is already integrated** (corrected 2026-06-26): the webhook handler `app/api/stripe/webhook/route.ts` (signature-verified via `STRIPE_WEBHOOK_SECRET`) and Checkout (`activateBilling` in `lib/billing/stripe-billing.ts`, `ui_mode:"elements"`) exist and are extensible. Credit purchase therefore folds into Spec A (it was previously split out only on the now-corrected assumption that the webhook was unwired). Live use still needs the prod Stripe webhook endpoint + credit-pack price IDs configured (ops, not code).
 
 ## Problem
 
@@ -18,7 +19,7 @@ A tenant's external systems should be able to **trigger one of that tenant's dev
 2. **Prepaid credit balance + append-only ledger.** The ledger is the source of truth AND the analytics source (per-company / per-device / per-time).
 3. **Reserve → settle → release.** At request time: reject offline/unknown device (no charge), reject insufficient balance (no charge), else HOLD 1 credit and return `202`. Device ack settles the hold to a debit; TTL expiry releases (refunds) the hold.
 4. **Scoped API keys.** Triggering requires a key with the `devices:trigger` scope. Existing keys are backfilled with read scopes only — never auto-granted `devices:trigger`.
-5. **Admin grant in Spec A; Stripe purchase is Spec C.** (User chose "both"; C is split out as a follow-up because of the Stripe-webhook dependency.)
+5. **Both top-up paths in Spec A:** admin grant AND self-serve Stripe credit-pack purchase (Stripe is already wired — see header).
 
 ## Defaults (set here; adjustable)
 
@@ -51,7 +52,7 @@ A tenant's external systems should be able to **trigger one of that tenant's dev
 - `note` text nullable (e.g. grant reason)
 - `createdByUserId` text nullable (for grants)
 - `createdAt` (indexed; analytics keyset)
-- Indexes: `(organizationId, createdAt)`, `(deviceId, createdAt)`, `(commandId)`.
+- Indexes: `(organizationId, createdAt)`, `(deviceId, createdAt)`, `(commandId)`, and a **unique** `(kind, idempotencyKey)` (partial, where `idempotencyKey is not null`) so a replayed Stripe purchase webhook can't double-grant.
 
 **`apiKey.scopes`** text[] not null default `{}`. Known scopes (a const union): `receipts:read`, `usage:read`, `devices:trigger`. **Migration backfills all existing keys** to `["receipts:read","usage:read"]` (their implicit current ability) — never `devices:trigger`.
 
@@ -70,7 +71,7 @@ All guards are **single SQL statements** (Neon `neon-http` has no interactive tr
   - `UPDATE credit_balance SET available = available - $cost, held = held + $cost, updatedAt = now() WHERE organizationId = $org AND available >= $cost RETURNING available` → if no row, insufficient. On success, insert a `hold` ledger row.
 - `settleHold(orgId, commandId, cost)` — `UPDATE credit_balance SET held = held - $cost WHERE organizationId=$org AND held >= $cost RETURNING held`; insert `settle` ledger row. (The credit is now truly spent: available already decremented at reserve; settle just clears the hold bucket.)
 - `releaseHold(orgId, commandId, cost)` — `UPDATE credit_balance SET available = available + $cost, held = held - $cost WHERE organizationId=$org AND held >= $cost RETURNING available`; insert `release` ledger row.
-- `grantCredits(orgId, credits, note, byUserId)` — `INSERT ... ON CONFLICT (organizationId) DO UPDATE SET available = credit_balance.available + $credits`; insert `grant` ledger row. (Creates the balance row if absent.)
+- `grantCredits(orgId, credits, { kind:"grant"|"purchase", note?, byUserId?, idempotencyKey? })` — for `purchase`, FIRST `INSERT INTO credit_ledger ... ON CONFLICT (kind, idempotencyKey) DO NOTHING RETURNING id`; only if a row was written do the balance upsert (`INSERT ... ON CONFLICT (organizationId) DO UPDATE SET available = credit_balance.available + $credits`). For `grant` (no idempotencyKey), upsert balance then insert the ledger row. (Creates the balance row if absent.) This ordering makes a replayed Stripe webhook a no-op.
 - `getBalance(orgId) → { available, held }`.
 
 Idempotency for settle/release: a `settle`/`release` is only applied if the command hasn't already been settled/released (guard on `deviceCommand.status` transition + the `held >= cost` check), so a double-ack or a race between ack and the TTL cron cannot double-move credits. The command status transition (`delivered → acked` / `delivered → expired`) is the lock: whichever single-statement `UPDATE deviceCommand SET status=... WHERE id=? AND status='delivered' RETURNING id` wins performs the credit move; the loser gets no row and does nothing.
@@ -105,6 +106,14 @@ If step 8 fails after step 7 reserved, immediately `releaseHold` (best-effort) a
 - **Balance + ledger view:** show `available`/`held` and a paginated ledger (kind, credits, device, action, time) on the tenant billing/usage area and/or the admin customer page.
 - **API-key scope picker:** at key creation in the existing API-key management UI, choose scopes (checkboxes: `receipts:read`, `usage:read`, `devices:trigger`). Default new keys to `["receipts:read","usage:read"]`.
 
+### Self-serve Stripe credit purchase (in scope — extends existing Stripe code)
+
+- **Credit packs:** a small config of packs `{ id, credits, priceId }`, e.g. `STRIPE_CREDIT_PACK_PRICE_IDS` env (one Stripe one-time Price per pack) → `lib/billing/credit-packs.ts`.
+- **Checkout:** `createCreditCheckout(orgId, packId)` in `lib/billing/stripe-billing.ts` — mirrors `activateBilling` but `mode:"payment"` (one-time), `line_items:[{ price: pack.priceId, quantity:1 }]`, `metadata:{ organizationId, packId, credits }`, `return_url → /tenant/billing`. A tenant "Buy credits" control invokes it.
+- **Webhook:** add a `case "checkout.session.completed"` to the existing switch in `app/api/stripe/webhook/route.ts`. When `session.mode === "payment"` and `payment_status === "paid"`, read `metadata.organizationId`/`credits` and call `grantCredits(org, credits, "stripe purchase", null)` with `kind:"purchase"`.
+- **Idempotency (critical — Stripe retries webhooks):** the `purchase` ledger row carries `idempotencyKey = session.id` under a **unique index** on `(kind, idempotencyKey)`; a replayed event hits the conflict and no-ops (no double-grant). `grantCredits` for purchases uses `INSERT ... ON CONFLICT DO NOTHING` on the ledger and only increments the balance when the ledger insert actually wrote a row.
+- Audited via `recordAudit` (actor `stripe`).
+
 ### Analytics / reporting (`lib/data.ts`)
 
 Queried entirely from `credit_ledger` (settle rows = realized spend):
@@ -134,12 +143,12 @@ Idempotent replays return the original status+body. Credit moves never double-ap
 - **Unit (`lib/credits.test.ts`):** reserve gates on `available >= cost`; concurrent reserves can't oversell (simulate by asserting the WHERE-guard semantics); settle/release move the right buckets; double-settle / settle-after-release is a no-op (guard returns no row); grant creates+increments.
 - **Idempotency:** two POSTs with the same key reserve once; second returns the stored response.
 - **Endpoint integration:** scope enforcement (403), ownership (404), offline (409), insufficient (402), happy path (202 + hold ledger row + queued command). Simulate the device: call the ack endpoint → settle; force `expiresAt` in the past + run the cron → release.
+- **Stripe purchase:** `checkout.session.completed` (paid) grants the pack's credits via a `purchase` ledger row; a replayed event with the same `session.id` is a no-op (unique `(kind, idempotencyKey)` conflict → balance unchanged).
 - **Analytics:** seed ledger rows → `getCreditUsageByDevice`/`ForOrg` return correct counts/sums.
 - **Migration:** existing API keys backfill to read scopes only; `credit_balance`/`credit_ledger`/`apiIdempotency` created; `deviceCommand` columns added.
 
 ## Out of scope (Spec A)
 
 - Firmware execution of `show_qr` + the real device ack (Spec B; until then, acks are simulated in tests/QA).
-- Self-serve Stripe credit purchase + webhook (Spec C).
 - Per-action pricing UI, credit-expiry, multiple currencies, refunds beyond hold-release.
 - Per-device API-key scoping (keys stay org-scoped; scope is by capability, not by device).
