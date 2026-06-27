@@ -1,133 +1,164 @@
 # Ditto Admin — Product Roadmap
 
-_Last updated: 2026-06-21_
+_Last updated: 2026-06-27_
 
-> **Shipped 2026-06-21 — Device Settings (cloud + firmware).** Org-wide device
-> policies — QR-code visible duration, screen brightness, screen sleep/wake +
-> inactivity timeout, and an on-device Settings PIN — set in the tenant console
-> under Branding (`/tenant/device-settings`), stored in `tenant_settings`,
-> delivered to every device via `/api/device/config` (ETag-versioned) and a
-> `config-changed` broadcast. Deployed to production. The device now honors them
-> (ditto-firmware **M7**: brightness→backlight, screen sleep with wake-on-touch/
-> receipt, long-press SHA-256-PIN-gated Settings menu) — merged, flashed, and
-> HW-verified. See Phase 2 → Device below.
+> **Terminology note.** This product has been renamed twice since the original
+> roadmap: **kiosk → printer** (2026-06-13) and **receipt → document**
+> (2026-06-27, cloud + firmware). This doc uses the current terms (printer,
+> document). Some DB columns deliberately keep the old names
+> (`tenantSettings.perPrintPriceCents`, the `kiosk`-era columns) to avoid
+> churn — that's intentional and not a gap.
+
+## Shipped since the original roadmap (2026-06-21 → 2026-06-27)
+
+Major deliveries that landed after this roadmap was first written, in addition
+to the per-phase ✅ markers below:
+
+- **Device Settings (cloud + firmware M7), 2026-06-21** — org-wide QR-visible
+  duration, screen brightness, sleep/wake + inactivity timeout, and an on-device
+  Settings PIN. Set under Branding (`/tenant/device-settings`), stored in
+  `tenant_settings`, delivered via `/api/device/config` (ETag-versioned) +
+  `config-changed` broadcast. Honored on-device (brightness→backlight, sleep
+  with wake-on-touch/document, SHA-256-PIN-gated Settings menu). HW-verified.
+- **Prepaid credits + public device-trigger API, 2026-06-26** — append-only
+  `credit_ledger` (reserve→settle→release) + `credit_balance` cache, scoped API
+  keys, a public `POST /api/v1/devices/{id}/trigger`, Stripe self-serve credit-pack
+  top-up, and the admin/tenant credit-usage surfaces. Firmware Spec B (device
+  receives the trigger, shows the QR, ACKs to settle the hold) HW-verified.
+- **Resend transactional email, 2026-06-27** — live API key wired; alert + signup
+  emails send. Domain verification still pending (sends to non-`erenaltan`
+  recipients are gated on it).
+- **Receipt → Document rename, 2026-06-27** — total rename across DB, public API
+  (`/api/v1/documents`), the QR route (`/d/{token}`), webhooks
+  (`document.created`/`document.downloaded`), UI, and the firmware. No back-compat.
 
 ## Context
 
-Ditto is a multi-tenant, digital-receipt SaaS. Kiosks replace paper receipts
-with a QR code customers scan to download a private digital receipt. The admin
+Ditto is a multi-tenant, digital-document SaaS. Printers replace paper documents
+with a QR code customers scan to download a private digital document. The admin
 console is **feature-complete** today: Better Auth (org = tenant) with self-serve
 signup, FK-scoped multi-tenancy, device provisioning + pairing → ingest →
-receipt → public-token delivery, R2 image storage, monthly billing generation,
+document → public-token delivery, R2 image storage, monthly billing generation,
 reports/CSV export, and both tenant + platform-admin dashboards.
 
 This roadmap covers the arc from **launch-readiness → billing → feature
-expansion → long-term vision**. Phase 0 is detailed for immediate execution
-(next 1–2 sprints); later phases set direction and will each get their own
-spec → plan cycle when picked up.
+expansion → long-term vision**. Phases past 0 set direction and each get their
+own spec → plan cycle when picked up.
 
 **Guiding principle:** a secure, stable, production-ready system comes *before*
 payment collection and billing automation. Phase ordering reflects that.
 
 ---
 
-## 🚀 Phase 0 — Launch Readiness _(Sprint 1–2, detailed)_
+## 🚀 Phase 0 — Launch Readiness
 
-The delta between "feature-complete" and "safe for real customers."
+The delta between "feature-complete" and "safe for real customers." **Largely
+shipped** — remaining gaps are the external-account/ops items called out below.
 
-### 1. Real landing page
-Replace the Next.js boilerplate in `app/page.tsx` (currently "edit page.tsx" +
-Next logo) with a real entry page that routes to `/login` and `/signup` and
-states what Ditto is. Authenticated visitors redirect to their dashboard by role.
+### 1. Real landing page — ✅ SHIPPED
+`app/page.tsx` is a real entry page ("Paper documents, gone.") that routes to
+`/login` / `/signup`; authenticated visitors redirect to their dashboard by role.
 
-### 2. Harden `/api/ingest`
-The ingest endpoint is the one public surface authenticated only by a device
-bearer key (not a user session). Before real devices hit it:
-- Per-device-key rate limiting (token bucket / sliding window)
-- Payload size caps on the uploaded receipt image (reject oversized/invalid)
-- Reject unknown/paused devices early (already partially handled — verify)
+### 2. Harden `/api/ingest` — ✅ SHIPPED
+Per-device-key rate limiting (`lib/rate-limit.ts`, atomic UPSERT), payload size
+caps on the uploaded document image, and early rejection of unknown/paused
+devices are all in place. The shared API guard lives in `lib/api/guard.ts`.
 
-### 3. Email verification
-Flip `requireEmailVerification` to `true` for self-serve signups and wire a
-transactional email sender (Resend recommended). Seeded prototype users may
-need a one-time backfill/verified flag. Covers signup confirmation + the
-hooks for password reset.
+### 3. Email verification — ⏳ MOSTLY (gated on domain)
+Resend is wired and sending (Phase-0 activation, 2026-06-27). Flipping
+`requireEmailVerification` to `true` for self-serve signups is gated on Resend
+**domain verification** (today only `erenaltan@…` receives). Backfill for seeded
+prototype users still to confirm.
 
-### 4. Observability
-- Error tracking + alerts (Sentry) across server actions, the ingest route, and
-  the public receipt route
-- Structured logging on the critical paths (ingest, claim, receipt download)
-- Basic uptime/health alerting
+### 4. Observability — ⏳ CODE COMPLETE (awaiting Sentry account)
+Sentry is wired manual/init-only (`lib/observability.ts`), env-gated — absent
+`SENTRY_DSN` the SDK no-ops. `beforeSend` scrubs secrets (device keys, `/d/`
+tokens). Structured logging is on the critical paths. **Open:** create the Sentry
+project + set the DSN to activate; add uptime/health alerting.
 
-### 5. Backup & restore strategy
-- Confirm Neon point-in-time-restore is enabled and document the recovery
-  procedure (RPO/RTO targets)
-- Verify R2 object lifecycle/versioning so receipt images aren't silently lost
-- Document a tested restore runbook (not just "backups exist")
+### 5. Backup & restore strategy — ⏳ OPEN
+Confirm Neon PITR is enabled + document RPO/RTO; verify R2 lifecycle/versioning so
+document images aren't silently lost; write a *tested* restore runbook.
 
-### 6. Smoke test suite
-First tests in the repo (none exist today). Cover the critical paths:
-- ingest → receipt row created → public token view → `ready → downloaded` flip
-- auth/role gates: `requireTenant` / `requirePlatformAdmin` reject the wrong role
-- device claim consumes the one-time pairing code and returns the raw key once
+### 6. Smoke test suite — ✅ SHIPPED (and grown)
+The repo went from zero tests to a 254-test pure-function suite (73 files) covering
+webhooks, billing, credits, search, serialization, and the env/observability glue.
+(End-to-end ingest→token→download flow tests remain a nice-to-add.)
 
-### 7. Deploy config
-Production env validation (`lib/env.ts`), Vercel deploy, health-check endpoint,
-and verify `serverExternalPackages` / webpack build flag survive the deploy
-pipeline (this has silently reverted before).
+### 7. Deploy config — ✅ SHIPPED
+Production env validation (`lib/env.ts`), Vercel deploy live
+(`ditto-admin-brown.vercel.app`), and a health-check endpoint (`/api/health` +
+`/api/cron/health`). `serverExternalPackages` survives the pipeline.
 
 ---
 
-## 💳 Phase 1 — Close the Billing Loop _(this quarter)_
+## 💳 Phase 1 — Close the Billing Loop
 
-Invoices currently generate (`draft` / `sent` / `paid`) but nothing collects.
+Two parallel money paths now exist: **prepaid credits** (shipped — the device-
+trigger model) and **monthly invoices** (generation only — collection still open).
 
-- **Stripe integration** — turn `sent` invoices into collectible payments;
-  payment webhooks reconcile invoice status
-- **Invoice lifecycle** — add `overdue` and `void` states; payment receipts
-- **Subscription enforcement** — grace periods, account suspension, and usage
-  limits (e.g. ingest throttling/blocking) for unpaid accounts
-- **Tenant-facing billing** — tenants can see and pay their own invoices
-  (billing is platform-admin-only today)
-- **Audit logs (start)** — begin capturing billing- and account-state changes;
-  the foundation for the broader audit log in Phase 2
+- **Stripe integration** — ✅ SHIPPED for credits (self-serve credit-pack
+  purchase + webhook reconciliation, **test mode**). Live keys deferred to
+  project completion (user decision). Invoice *collection* via Stripe is still
+  open.
+- **Invoice lifecycle** — ⏳ PARTIAL. The `invoice.status` enum already carries
+  `draft`/`sent`/`paid`/`overdue`/`void`. **Open:** the transitions that drive
+  them (auto-`overdue`, payment receipts) and a pay action.
+- **Subscription / usage enforcement** — ⏳ OPEN. Credits already gate device
+  triggers (reserve→settle), but grace periods, account suspension, and ingest
+  throttling for unpaid *invoice* accounts are not built.
+- **Tenant-facing billing** — ⏳ PARTIAL. Tenants see their credit usage; paying
+  their own invoices (billing is platform-admin-only today) is still open.
+- **Audit logs (start)** — ✅ STARTED. Best-effort audit logging captures
+  significant actions (incl. device commands enqueued) with actor/action/target/
+  metadata.
 
 ---
 
 ## 📈 Phase 2 — Feature Expansion
 
-- **Audit logs (full)** — tenant- and platform-level activity trail across
-  devices, members, billing, and settings. Pulled early here for enterprise
-  readiness.
-- **Tenant** — receipt search/filtering, live branding preview, team member
-  invites (the org plugin already supports membership), per-store analytics
-- **Platform admin** — tenant health dashboard, usage-based alerts, fleet-wide
-  status views
-- **Device** — remote pause/reboot, firmware/version tracking, offline detection.
-  ✅ **Device Settings shipped 2026-06-21** — org-wide brightness, screen
-  sleep/wake, QR-visible duration, and an on-device Settings PIN, configured in
-  the tenant console and honored on-device (firmware M7).
+- **Audit logs (full)** — ⏳ PARTIAL (foundation shipped in Phase 1; the
+  tenant/platform-facing activity trail UI is open).
+- **Tenant** — ✅ document search/filtering (`lib/documents-search.ts`, keyset
+  pagination) and ✅ live branding preview (the printer-preview surface) are
+  shipped. ⏳ Open: team-member invites (org plugin already supports membership),
+  per-store analytics.
+- **Platform admin** — ⏳ tenant health dashboard, usage-based alerts
+  (`lib/alerts-sync.ts` exists as a start), fleet-wide status views.
+- **Device** — ✅ **Device Settings shipped 2026-06-21** (see banner). Device
+  commands + ACK plumbing exist (trigger/show_qr), and `firmwareVersion` is
+  reported on ingest. ⏳ Open: remote pause/reboot UI, offline detection,
+  first-class firmware/version tracking in the console.
 
 ---
 
 ## 🔭 Phase 3 — Long-Term Vision
 
-- Customer-facing receipt features (loyalty, opt-in marketing, return/warranty
-  lookup off the receipt token)
-- Multi-region R2, white-label custom domains per tenant
-- Public API + webhooks so tenants can pull their own receipt data
+- **Public API + webhooks** — ✅ SHIPPED EARLY. `app/api/v1/{documents,devices,
+  usage}` + `openapi.json`, and signed webhook delivery with retry
+  (`lib/webhooks/`), so tenants can pull their own document data and subscribe to
+  `document.*` events.
+- Customer-facing document features (loyalty, opt-in marketing, return/warranty
+  lookup off the document token) — ⏳ OPEN.
+- Multi-region R2, white-label custom domains per tenant — ⏳ OPEN.
 
 ---
 
 ## Out of scope (for now)
 
-- Mobile apps (web-first; receipts are already mobile-web by nature)
-- The kiosk firmware itself (this repo is the admin console + ingest API)
+- Mobile apps (web-first; documents are already mobile-web by nature)
 - Non-Stripe payment processors
+
+(The printer firmware lives in its own repo, **ditto-firmware**, with its own
+milestone roadmap — it is no longer "out of scope" for the product but is tracked
+separately.)
 
 ## Sequencing notes
 
-- **Don't move payments ahead of Phase 0.** Hardening, observability, and
-  recoverability gate the billing work.
-- Each phase past 0 gets its own `spec → plan → implementation` cycle when
-  started; Phase 0 items are small enough to plan as one batch.
+- **Don't move invoice collection ahead of the Phase 0 ops gaps** (Sentry DSN,
+  backup/restore runbook, email-domain verification). Hardening and recoverability
+  gate the remaining billing work.
+- Each phase past 0 gets its own `spec → plan → implementation` cycle when started.
+- **Standing ops items (user-owned):** Stripe dashboard meter `event_name` →
+  `documents`; Resend domain verification; Stripe test → live keys (deferred to
+  project completion).
