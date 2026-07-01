@@ -44,6 +44,18 @@ trigger a new deploy (see §3).
 Email verification (`requireEmailVerification`) only becomes real once email can
 be delivered. Until then, company signup auto-verifies (so dev/seed never breaks).
 
+> **CURRENT STATUS (re-verified 2026-07-01).** Resend is already ON in prod:
+> `RESEND_API_KEY` is set on Vercel (a valid sending-scoped `re_…` key) and
+> `EMAIL_FROM` is the onboarding default — so we are in **test mode (§2a)**, not
+> production. Live-confirmed: send to `erenaltan@gmail.com` = 200; send to any
+> other recipient = **403** ("You can only send testing emails to your own email
+> address… verify a domain"). Consequence: **all Phase 3C customer-facing email**
+> (document-me-this-document, magic-link recovery) and any tenant email to a
+> non-`erenaltan@gmail.com` address will **not deliver** — `sendEmail` catches the
+> 403, logs + reports to Sentry, and returns `false`, so nothing breaks; the mail
+> just doesn't go out. **The only step left to reach real customers is §2b
+> (verify a domain + set `EMAIL_FROM`).** No code changes needed.
+
 ### 2a. Test mode (no domain) — prove it works now
 1. Create a free account at https://resend.com (no credit card).
 2. **API Keys** → create a key (`re_...`).
