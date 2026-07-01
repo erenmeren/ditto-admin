@@ -1,6 +1,6 @@
 # Ditto Admin — Product Roadmap
 
-_Last updated: 2026-06-27_
+_Last updated: 2026-07-01_
 
 > **Terminology note.** This product has been renamed twice since the original
 > roadmap: **kiosk → printer** (2026-06-13) and **receipt → document**
@@ -9,10 +9,23 @@ _Last updated: 2026-06-27_
 > (`tenantSettings.perPrintPriceCents`, the `kiosk`-era columns) to avoid
 > churn — that's intentional and not a gap.
 
-## Shipped since the original roadmap (2026-06-21 → 2026-06-27)
+## Shipped since the original roadmap (2026-06-21 → 2026-07-01)
 
-Major deliveries that landed after this roadmap was first written, in addition
-to the per-phase ✅ markers below:
+**Phases 1, 2, and 3A–3C all completed between 2026-06-27 and 2026-07-01.** In
+brief (details in each phase section below):
+
+- **Phase 1 — Billing loop CLOSED** (1A payable Stripe invoices / hybrid
+  collection, 1B dunning cron + `isOrgPaymentBlocked` enforcement, 1C tenant
+  transition emails). Stripe still in test mode (live keys deferred by user).
+- **Phase 2 — Feature expansion CLOSED** (2A device fleet ops + offline reconcile,
+  2B per-tenant health rollup + offline email, 2C audit-log activity UI).
+- **Phase 3A–3C shipped** — branded public document page (3A), return/warranty
+  window (3B), document-email + single-use magic-link recovery + opt-in marketing
+  contacts (3C, merged+deployed 2026-07-01). This closes the doc's old Phase 3
+  "return/warranty lookup" and "opt-in marketing" open items.
+
+Earlier deliveries (2026-06-21 → 2026-06-27), in addition to the per-phase ✅
+markers below:
 
 - **Device Settings (cloud + firmware M7), 2026-06-21** — org-wide QR-visible
   duration, screen brightness, sleep/wake + inactivity timeout, and an on-device
@@ -81,8 +94,9 @@ Confirm Neon PITR is enabled + document RPO/RTO; verify R2 lifecycle/versioning 
 document images aren't silently lost; write a *tested* restore runbook.
 
 ### 6. Smoke test suite — ✅ SHIPPED (and grown)
-The repo went from zero tests to a 254-test pure-function suite (73 files) covering
-webhooks, billing, credits, search, serialization, and the env/observability glue.
+The repo went from zero tests to a **332-test** pure-function suite (49 files) covering
+webhooks, billing, credits, search, serialization, coverage/return-window math,
+lookup-token/normalize/email-template helpers, and the env/observability glue.
 (End-to-end ingest→token→download flow tests remain a nice-to-add.)
 
 ### 7. Deploy config — ✅ SHIPPED
@@ -92,55 +106,65 @@ Production env validation (`lib/env.ts`), Vercel deploy live
 
 ---
 
-## 💳 Phase 1 — Close the Billing Loop
+## 💳 Phase 1 — Close the Billing Loop — ✅ COMPLETE
 
-Two parallel money paths now exist: **prepaid credits** (shipped — the device-
-trigger model) and **monthly invoices** (generation only — collection still open).
+Both money paths now close end-to-end: **prepaid credits** (the device-trigger
+model) and **monthly invoices** (generation → collection → dunning → receipts).
 
-- **Stripe integration** — ✅ SHIPPED for credits (self-serve credit-pack
-  purchase + webhook reconciliation, **test mode**). Live keys deferred to
-  project completion (user decision). Invoice *collection* via Stripe is still
-  open.
-- **Invoice lifecycle** — ⏳ PARTIAL. The `invoice.status` enum already carries
-  `draft`/`sent`/`paid`/`overdue`/`void`. **Open:** the transitions that drive
-  them (auto-`overdue`, payment receipts) and a pay action.
-- **Subscription / usage enforcement** — ⏳ OPEN. Credits already gate device
-  triggers (reserve→settle), but grace periods, account suspension, and ingest
-  throttling for unpaid *invoice* accounts are not built.
-- **Tenant-facing billing** — ⏳ PARTIAL. Tenants see their credit usage; paying
-  their own invoices (billing is platform-admin-only today) is still open.
-- **Audit logs (start)** — ✅ STARTED. Best-effort audit logging captures
+- **Stripe integration** — ✅ SHIPPED for credits AND invoices. Invoice
+  *collection* now goes through Stripe as payable invoices (1A, hybrid
+  collection, Net 14 pay-link). Still **test mode** — live keys deferred to
+  project completion (user decision).
+- **Invoice lifecycle** — ✅ SHIPPED. The billing cron (1B) generates invoices,
+  auto-sends to card tenants, and sweeps overdue; `invoice.dueDate` drives
+  auto-`overdue`; tenant transition emails (1C) fire on sent/failed/paid/overdue.
+- **Subscription / usage enforcement** — ✅ SHIPPED. `isOrgPaymentBlocked` gates
+  past-due (402) and suspended (403) accounts (fail-open), on top of the existing
+  credit reserve→settle gating for device triggers.
+- **Tenant-facing billing** — ✅ SHIPPED. Tenants see credit usage and can pay
+  their own invoices via the hosted Stripe pay-link.
+- **Audit logs (start)** — ✅ SHIPPED. Best-effort audit logging captures
   significant actions (incl. device commands enqueued) with actor/action/target/
-  metadata.
+  metadata. (Full activity-trail UI landed in Phase 2C.)
 
 ---
 
-## 📈 Phase 2 — Feature Expansion
+## 📈 Phase 2 — Feature Expansion — ✅ COMPLETE
 
-- **Audit logs (full)** — ⏳ PARTIAL (foundation shipped in Phase 1; the
-  tenant/platform-facing activity trail UI is open).
+- **Audit logs (full)** — ✅ SHIPPED (2C). Friendly action labels + humanizer,
+  `getOrgAuditPage` pagination, tenant Activity table, and admin labels.
 - **Tenant** — ✅ document search/filtering (`lib/documents-search.ts`, keyset
-  pagination) and ✅ live branding preview (the printer-preview surface) are
-  shipped. ⏳ Open: team-member invites (org plugin already supports membership),
-  per-store analytics.
-- **Platform admin** — ⏳ tenant health dashboard, usage-based alerts
-  (`lib/alerts-sync.ts` exists as a start), fleet-wide status views.
-- **Device** — ✅ **Device Settings shipped 2026-06-21** (see banner). Device
-  commands + ACK plumbing exist (trigger/show_qr), and `firmwareVersion` is
-  reported on ingest. ⏳ Open: remote pause/reboot UI, offline detection,
-  first-class firmware/version tracking in the console.
+  pagination), ✅ live branding preview (the printer-preview surface),
+  ✅ team-member invites, and ✅ per-store analytics are shipped.
+- **Platform admin** — ✅ tenant health dashboard + per-tenant health rollup (2B),
+  ✅ usage-based alerts (`lib/alerts-sync.ts`, daily health cron), and
+  ✅ fleet-wide status views / device detail (2A) are shipped.
+- **Device** — ✅ **Device Settings shipped 2026-06-21** (see banner). ✅ Device
+  fleet ops + offline reconcile (2A, folded into the daily health cron),
+  ✅ first-class firmware/version tracking (fleet firmware column/badge), and
+  device commands + ACK plumbing (trigger/show_qr). ⏳ Open (minor): a dedicated
+  remote pause/reboot UI.
 
 ---
 
-## 🔭 Phase 3 — Long-Term Vision
+## 🔭 Phase 3 — Long-Term Vision — 🟡 IN PROGRESS (3A–3C shipped)
 
 - **Public API + webhooks** — ✅ SHIPPED EARLY. `app/api/v1/{documents,devices,
   usage}` + `openapi.json`, and signed webhook delivery with retry
   (`lib/webhooks/`), so tenants can pull their own document data and subscribe to
   `document.*` events.
-- Customer-facing document features (loyalty, opt-in marketing, return/warranty
-  lookup off the document token) — ⏳ OPEN.
-- Multi-region R2, white-label custom domains per tenant — ⏳ OPEN.
+- **Customer-facing document features** — 🟡 mostly shipped off the document token:
+  - ✅ **3A branded document page** — tenant logo + brand-color accent +
+    provenance + optional support block (merged 2026-06-28).
+  - ✅ **3B return/warranty lookup** — public `/d/{token}` shows computed
+    return-deadline + warranty-expiry from tenant-set windows (shipped to prod
+    2026-06-29/30).
+  - ✅ **3C document email + recovery + opt-in marketing** — email-me-this-document,
+    single-use magic-link recovery (`/d/lookup/...`, interstitial-POST so
+    prefetchers can't burn the link), and tenant marketing-contacts page + CSV
+    export (merged+deployed 2026-07-01). Ships inert until Resend domain
+    verification. ⏳ Open: **loyalty**.
+- **Infra** — ⏳ OPEN: multi-region R2, white-label custom domains per tenant.
 
 ---
 
@@ -155,10 +179,17 @@ separately.)
 
 ## Sequencing notes
 
-- **Don't move invoice collection ahead of the Phase 0 ops gaps** (Sentry DSN,
-  backup/restore runbook, email-domain verification). Hardening and recoverability
-  gate the remaining billing work.
-- Each phase past 0 gets its own `spec → plan → implementation` cycle when started.
+- **Phases 1 and 2 are closed; Phase 3 is underway (3A–3C shipped).** The billing
+  loop shipped in test mode, so the original "don't collect before hardening" gate
+  is moot — what remains are the Phase 0 ops gaps themselves.
+- **Remaining Phase 0 hardening (the real "next"):**
+  - **Backup & restore runbook** (§5) — the only remaining item fully actionable
+    without a new external account; do this next.
+  - **Sentry DSN** (§4) — code-complete, needs the account + DSN.
+  - **Email-domain verification** (§3) — flips `requireEmailVerification` on and
+    lets Phase 3C customer emails actually deliver (today: `erenaltan@…` only).
+- Remaining Phase 3 initiatives (loyalty; multi-region R2; white-label custom
+  domains) each get their own `spec → plan → implementation` cycle when started.
 - **Standing ops items (user-owned):** Stripe dashboard meter `event_name` →
   `documents`; Resend domain verification; Stripe test → live keys (deferred to
   project completion).
