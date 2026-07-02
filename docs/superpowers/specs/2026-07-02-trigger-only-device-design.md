@@ -24,8 +24,9 @@ document is created, stored, or served by Ditto.
 
 ## Goals
 
-- Keep exactly one device-activation path: the trigger API.
-- Adopt the caller-friendly request shape `{ deviceId, payloadType, value }`.
+- Keep exactly one device-activation path: the **existing** trigger API.
+- Refine that endpoint's request body to `{ payloadType, value }` (deviceId stays
+  in the path) — no new endpoint.
 - Remove the document subsystem and everything Phase 3A–3C built on it.
 - Do **not** break the already-shipped Spec-B firmware (it parses the internal
   `show_qr` command payload).
@@ -44,10 +45,19 @@ document is created, stored, or served by Ditto.
 
 ## Design
 
-### 1. Trigger API — new public request shape
+### 1. Trigger API — reuse and refine the existing endpoint
 
-- **New endpoint:** `POST /api/v1/devices/trigger`
-  Body: `{ "deviceId": string, "payloadType": "url", "value": string }`
+We already shipped the trigger flow; we **keep the existing route and refine its
+request body**. No new endpoint is introduced.
+
+- **Endpoint (unchanged):** `POST /api/v1/devices/{deviceId}/trigger`
+  (`app/api/v1/devices/[deviceId]/trigger/route.ts`) — `deviceId` stays in the
+  **path**, exactly as today.
+- **Refined request body:** `{ "payloadType": "url", "value": string }`
+  - `deviceId` comes from the path (not the body), since we are reusing the
+    path-based route. *(This is the one reconciliation vs. the earlier
+    `{deviceId, payloadType, value}` mental model: the endpoint already carries
+    deviceId in the URL, so the body only needs `payloadType` + `value`.)*
   - `payloadType` — only `"url"` supported today; the field exists so future
     payload types can be added without another contract break.
   - `value` — an `http:`/`https:` URL, length 1–2048 (reuses the existing
@@ -57,18 +67,19 @@ document is created, stored, or served by Ditto.
   `{ action: "show_qr", payload: { url: value } }`. The device polls
   `/api/device/commands` and receives the identical shape it already parses, so
   **no firmware change is required.**
-- **Preserved behavior** (all already implemented on the current route, moved to
-  the new one): API-key auth via `guardApiRequest`, `devices:trigger` scope check,
-  required `Idempotency-Key` header + idempotency replay, credit
-  reserve→settle→release, `device_offline`/`device_not_found`/`insufficient_credits`
-  error paths, 60s command TTL, lazy expired-hold reconciliation.
-- **Removed:** the old path-param route `app/api/v1/devices/[deviceId]/trigger/`.
+- **Preserved behavior** (already implemented on this route — kept as-is): API-key
+  auth via `guardApiRequest`, `devices:trigger` scope check, required
+  `Idempotency-Key` header + idempotency replay, credit reserve→settle→release,
+  `device_not_found`/`device_offline`/`insufficient_credits` error paths, 60s
+  command TTL, lazy expired-hold reconciliation.
 - `lib/trigger-actions.ts` stays as the internal action/cost source of truth
-  (`show_qr` = 1 credit). `validateTriggerBody` is refactored/renamed to validate
-  the new external `{ deviceId, payloadType, value }` shape (deviceId presence +
-  URL validity), still returning the internal action/payload.
-- **OpenAPI:** `app/api/v1/openapi.json` updated to the new endpoint + schema;
-  document endpoints removed from it.
+  (`show_qr` = 1 credit). `validateTriggerBody` is **refined in place** to accept
+  the new `{ payloadType, value }` body (validate `payloadType === "url"` +
+  `isValidUrl(value)`) and still return the internal `{ action, payload }`. Its
+  unit tests (`lib/trigger-actions.test.ts`) are updated to the new body shape.
+- **OpenAPI:** if/when `app/api/v1/openapi.json` documents this endpoint, update the
+  request schema to `{ payloadType, value }`; there is currently no trigger entry
+  to change. Document endpoints are removed from it (see §2).
 
 ### 2. Remove the document subsystem
 
@@ -134,8 +145,8 @@ stores; audit log; auth / orgs; health + usage crons.
 ```
 External system                Ditto cloud                     Device
 ---------------                -----------                     ------
-POST /api/v1/devices/trigger
-  { deviceId, payloadType:"url",
+POST /api/v1/devices/{deviceId}/trigger
+  { payloadType:"url",
     value: "https://host/doc" }
         ──────────────────────▶  auth + scope + idempotency
                                  reserve 1 credit
@@ -156,10 +167,10 @@ Unchanged from the current trigger route — `invalid_request` (bad body/URL),
 
 ## Testing
 
-- **Add / update:** trigger-body validation tests for the new
-  `{ deviceId, payloadType, value }` shape; an endpoint test for
-  `POST /api/v1/devices/trigger` covering the full reserve→enqueue→idempotency
-  path and internal `show_qr` mapping.
+- **Add / update:** `lib/trigger-actions.test.ts` for the refined
+  `{ payloadType, value }` body; endpoint coverage for the existing
+  `POST /api/v1/devices/{deviceId}/trigger` route exercising the full
+  reserve→enqueue→idempotency path and the internal `show_qr` mapping.
 - **Remove:** ingest, document, lookup, Phase-3, and marketing-contacts test
   suites alongside their code. Overall test count will drop from 332.
 - **Keep:** credit ledger/holds, device-command/config/status, API-scope, and
