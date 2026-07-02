@@ -102,26 +102,42 @@ request body**. No new endpoint is introduced.
 branded document page, return/warranty window, email-me-this-document,
 magic-link recovery, marketing contacts.
 
+**Webhook subsystem removed** (added during planning — not vestigial). The webhook
+feature's only event types are `document.created` / `document.downloaded`, its
+`events.ts` imports `serializeDocumentRow` (→ `DocumentStatus` from
+`documents-search`), and both emitters (ingest, the `/d` page) are being deleted.
+Unlike billing — which only needs the `document` *table* to stay — keeping
+webhooks would force us to retain live document application code (serializer +
+status type + event builder). So the whole subsystem is deleted: `lib/webhooks/**`,
+`lib/actions/webhooks.ts`, the two `components/webhook-*.tsx`, the tenant
+`/tenant/webhooks` page, `app/api/cron/webhooks/route.ts` (+ its cron schedule),
+and the `webhookEndpoint` + `webhookDelivery` tables. *(Flagged for confirmation;
+this is the one item beyond the originally-approved spec.)*
+
 **Schema / migration:**
-- Drop tables `documentContact` and the `lookup` table(s) (Phase-3 additions),
-  plus the Phase-3 columns added to `tenantSettings` (logo/brand-color/support/
-  return-window/warranty settings that only fed the `/d` page — audit each; keep
-  any also used by the device QR screen branding).
-- **Keep** the `document` table definition (billing dependency).
+- Drop tables `documentContact`, `marketingContact`, `lookupToken` (Phase-3
+  additions), and `webhookEndpoint` + `webhookDelivery` (webhook subsystem).
+- Drop the Phase-3 `tenantSettings` columns that only fed the `/d` page:
+  `supportEmail`, `supportUrl`, `returnWindowDays`, `warrantyPeriodMonths`.
+  **Keep** the branding columns (`logoUrl`, `brandColor`, `brandBg/Fg/Muted`) —
+  they also drive the device idle/QR screen.
+- **Keep** the `document` table definition (billing dependency) and the
+  `usageEvent` table (billing/usage, untouched).
 - New Drizzle migration; strip generated SQL to just these drops
   (per the known snapshot-drift gotcha).
 
 **Tenant / admin UI:**
 - Remove `/tenant/documents` (list, `[documentId]` detail, search).
 - Remove the tenant marketing-contacts page and document-recovery surfaces.
-- **Metrics (DEFAULT — repoint to QR triggers):** replace every "documents
-  delivered" count/series in the tenant dashboard, `/tenant/analytics`,
-  `/tenant/reports`, store detail, and admin home with trigger counts. Source of
-  truth = the **credit ledger** (settled `show_qr` charges) — it persists as a
-  billing-grade record and supports historical time-series; `deviceCommand`
-  (type = `trigger`, also persisted, no reaper) is the fallback for pending/failed
-  breakdowns. Tenants see "QRs shown" instead of "documents." *(Chosen by default
-  while user was away; revertible to "just remove the metric cards" on review.)*
+- **Metrics — repoint to QR triggers (separate follow-up plan).** The dashboard
+  count/series queries read the `document` table directly; because that table is
+  **kept vestigial**, they keep compiling and simply return **0** after the
+  teardown. Repointing them to trigger counts (source of truth = the **credit
+  ledger** — settled `show_qr` charges; `deviceCommand` type=`trigger` as the
+  fallback for pending/failed breakdowns) touches ~12 UI files + `lib/data.ts` +
+  `lib/types.ts` + `components/charts.tsx` and is its own testable unit. It is
+  therefore carved into a **follow-up plan**, not this teardown. Nav links to the
+  dead document/contacts pages ARE removed here so nothing 404s.
 
 ### 3. Billing — unchanged (explicit decision)
 
