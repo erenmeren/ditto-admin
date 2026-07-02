@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reduce the Ditto cloud to a single device-activation path (the existing credit-metered `trigger` API), deleting the entire document / print / R2-ingest subsystem, all Phase 3A–3C features, and the (document-only) webhook subsystem.
+**Goal:** Reduce the Ditto cloud to a single device-activation path (the existing credit-metered `trigger` API, **contract unchanged**), deleting the entire document / print / R2-ingest subsystem, all Phase 3A–3C features, and the (document-only) webhook subsystem.
 
-**Architecture:** The `trigger` endpoint stays and its request body is refined to `{ payloadType, value }`, mapped internally to the unchanged `show_qr` device command (so shipped firmware is untouched). Everything that creates, stores, serves, or notifies about documents is removed. The `document` and `usageEvent` tables are **kept vestigial** so the billing/usage code (explicitly left alone) keeps compiling and simply meters $0.
+**Architecture:** The `trigger` endpoint and its request body stay exactly as shipped — everything that creates, stores, serves, or notifies about documents is removed around it. The `document` and `usageEvent` tables are **kept vestigial** so the billing/usage code (explicitly left alone) keeps compiling and simply meters $0.
 
 **Tech Stack:** Next.js 16 (App Router) + React 19 + TypeScript strict, Drizzle ORM over Neon Postgres, Better Auth, Cloudflare R2, Vitest.
 
@@ -12,9 +12,9 @@
 
 - **Reference spec:** `docs/superpowers/specs/2026-07-02-trigger-only-device-design.md` (verbatim source of truth).
 - **Branch:** `refactor/trigger-only-device` (already checked out).
+- **Trigger contract is FROZEN.** Do NOT change `app/api/v1/devices/[deviceId]/trigger/route.ts`, `lib/trigger-actions.ts`, or `lib/trigger-actions.test.ts` — the request body stays `{ action:"show_qr", payload:{ url } }` and the internal device command stays identical. These files have no dependency on anything removed here, so they should need no edits at all. If a deletion somehow forces a touch, keep the public contract and the `show_qr`/`payload.url` shape byte-for-byte identical.
 - **KEEP vestigial, do NOT touch:** the `document` table, the `usageEvent` table, `lib/billing/**`, `lib/billing-engine.ts`, the `invoice` table, `perPrintPriceCents`, `getApiUsage`/`serializeUsage`/`app/api/v1/usage`, and the credit ledger / holds.
 - **KEEP unchanged:** device claim/commands/ack/config/firmware/OTA, credits, R2 core (`putObject`/`presignedGetUrl`/`deleteObject` + logo/icon/image/firmware storage-key helpers), branding/logo (`lib/branding-shell.ts`, `components/branding-editor.tsx`, `tenantSettings.logoUrl`/`brandColor`/`brandBg`/`brandFg`/`brandMuted`), stores, audit log, auth/orgs, health + usage crons.
-- **Firmware compatibility:** the internal device command MUST remain `{ action: "show_qr", payload: { url } }`. Do not rename `show_qr` or the `payload.url` key.
 - **Deletion ordering rule:** always delete *importers* before *producers* — `next build` typechecks the whole project, so any dangling import fails the build. Every task ends with a green build + test suite.
 - **Verification per task:** `npm run build` (webpack) passes AND `npm test` (vitest run) passes AND a targeted grep shows no dangling references, THEN commit.
 - **Line numbers below are from the map at planning time and will drift as edits land — locate code by the named symbol, not the line number.**
@@ -22,128 +22,9 @@
 
 ---
 
-### Task 1: Refine the trigger request body to `{ payloadType, value }`
+### Task 1: Delete the webhook subsystem
 
-The only "keep + refine" task. The route (`app/api/v1/devices/[deviceId]/trigger/route.ts`) already does `const v = validateTriggerBody(raw)` then uses `v.action` / `v.payload` — so the **route needs no change**; we only change `validateTriggerBody` (and its tests) to accept the new external shape while still returning the internal `{ action, payload }`.
-
-**Files:**
-- Modify: `lib/trigger-actions.ts`
-- Test: `lib/trigger-actions.test.ts`
-
-**Interfaces:**
-- Consumes: nothing new.
-- Produces: `validateTriggerBody(raw: unknown) => { ok: true; action: TriggerAction; payload: Record<string, unknown> } | { ok: false; error: string }` — unchanged return shape; new accepted input `{ payloadType: "url", value: string }`. `TRIGGER_ACTIONS`, `TriggerAction`, and `creditCostForAction` stay exactly as they are.
-
-- [ ] **Step 1: Rewrite the test file to the new body shape (failing test)**
-
-Replace the entire contents of `lib/trigger-actions.test.ts` with:
-
-```ts
-import { describe, it, expect } from "vitest";
-import { validateTriggerBody, creditCostForAction } from "./trigger-actions";
-
-describe("validateTriggerBody", () => {
-  it("accepts a url payloadType with a valid value and maps to show_qr", () => {
-    const r = validateTriggerBody({ payloadType: "url", value: "https://x.co/r/abc" });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.action).toBe("show_qr");
-      expect(r.payload).toEqual({ url: "https://x.co/r/abc" });
-    }
-  });
-
-  it("rejects an unknown payloadType", () => {
-    expect(validateTriggerBody({ payloadType: "explode", value: "https://x.co" }).ok).toBe(false);
-  });
-
-  it("rejects a missing or non-http(s) value", () => {
-    expect(validateTriggerBody({ payloadType: "url" }).ok).toBe(false);
-    expect(validateTriggerBody({ payloadType: "url", value: "ftp://x" }).ok).toBe(false);
-    expect(validateTriggerBody({ payloadType: "url", value: "x".repeat(3000) }).ok).toBe(false);
-  });
-
-  it("rejects a non-object body", () => {
-    expect(validateTriggerBody(null).ok).toBe(false);
-    expect(validateTriggerBody("nope").ok).toBe(false);
-  });
-});
-
-describe("creditCostForAction", () => {
-  it("charges 1 credit for show_qr", () => {
-    expect(creditCostForAction("show_qr")).toBe(1);
-  });
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `npx vitest run lib/trigger-actions.test.ts`
-Expected: FAIL (current `validateTriggerBody` still expects `{ action, payload }`, so the `payloadType` cases fail).
-
-- [ ] **Step 3: Refine `validateTriggerBody` in `lib/trigger-actions.ts`**
-
-Keep `TRIGGER_ACTIONS`, `TriggerAction`, `COST`, `creditCostForAction`, `MAX_URL`, and `isValidUrl` exactly as they are. Replace the `TriggerBody` type + `ValidateResult` type + `validateTriggerBody` function with:
-
-```ts
-/** External request payload types. "url" → the device shows a QR of the URL. */
-export const PAYLOAD_TYPES = ["url"] as const;
-export type PayloadType = (typeof PAYLOAD_TYPES)[number];
-
-/** Maps an external payloadType to the internal device-command action. */
-const PAYLOAD_ACTION: Record<PayloadType, TriggerAction> = { url: "show_qr" };
-
-export type ValidateResult =
-  | { ok: true; action: TriggerAction; payload: Record<string, unknown> }
-  | { ok: false; error: string };
-
-/**
- * Validate the public trigger body `{ payloadType, value }` and translate it to
- * the internal device command `{ action, payload }`. Firmware still receives the
- * unchanged `show_qr` + `{ url }` shape.
- */
-export function validateTriggerBody(raw: unknown): ValidateResult {
-  if (!raw || typeof raw !== "object") return { ok: false, error: "Body must be a JSON object." };
-  const b = raw as Record<string, unknown>;
-  if (!(PAYLOAD_TYPES as readonly string[]).includes(b.payloadType as string)) {
-    return { ok: false, error: `Unknown payloadType. Supported: ${PAYLOAD_TYPES.join(", ")}.` };
-  }
-  const payloadType = b.payloadType as PayloadType;
-  if (!isValidUrl(b.value)) {
-    return { ok: false, error: "value must be an http(s) URL ≤ 2048 chars." };
-  }
-  return { ok: true, action: PAYLOAD_ACTION[payloadType], payload: { url: b.value } };
-}
-```
-
-(Delete the old `export type TriggerBody = ...` line — it is no longer used.)
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `npx vitest run lib/trigger-actions.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Confirm no other code referenced the removed `TriggerBody` type**
-
-Run: `grep -rn "TriggerBody" app lib --include="*.ts" | grep -v node_modules`
-Expected: no results.
-
-- [ ] **Step 6: Build + full test suite**
-
-Run: `npm run build && npm test`
-Expected: both PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add lib/trigger-actions.ts lib/trigger-actions.test.ts
-git commit -m "feat(trigger): refine request body to {payloadType,value}, map to show_qr"
-```
-
----
-
-### Task 2: Delete the webhook subsystem
-
-Webhooks only ever carry `document.*` events and `events.ts` imports `serializeDocumentRow`. Delete the whole feature. `serializeDocumentRow` stays for now (still used by the v1 documents API, removed in Task 4).
+Webhooks only ever carry `document.*` events and `events.ts` imports `serializeDocumentRow`. Delete the whole feature. `serializeDocumentRow` stays for now (still used by the v1 documents API, removed in Task 3).
 
 **Files:**
 - Delete: `lib/webhooks/deliver.ts`, `lib/webhooks/sign.ts`, `lib/webhooks/sign.test.ts`, `lib/webhooks/retry.ts`, `lib/webhooks/retry.test.ts`, `lib/webhooks/url-guard.ts`, `lib/webhooks/url-guard.test.ts`, `lib/webhooks/events.ts`, `lib/webhooks/events.test.ts` (the whole `lib/webhooks/` dir)
@@ -180,7 +61,7 @@ If found, delete that cron entry from the crons array. If no match, skip.
 - [ ] **Step 4: Verify no dangling references to the webhook code**
 
 Run: `grep -rn "lib/webhooks\|actions/webhooks\|webhook-row-actions\|webhook-create-dialog\|buildEvent\|WEBHOOK_EVENT\|deliverWebhook\|/tenant/webhooks" app lib components --include="*.ts" --include="*.tsx" | grep -v node_modules | grep -v worktrees`
-Expected: no results. (`webhookEndpoint` / `webhookDelivery` schema tables still exist — they are dropped in Task 8. `app/api/stripe/webhook` is unrelated and stays.)
+Expected: no results. (`webhookEndpoint` / `webhookDelivery` schema tables still exist — they are dropped in Task 7. `app/api/stripe/webhook` is unrelated and stays.)
 
 - [ ] **Step 5: Build + test**
 
@@ -196,9 +77,9 @@ git commit -m "refactor: remove document-only webhook subsystem"
 
 ---
 
-### Task 3: Delete the tenant + admin document UI pages
+### Task 2: Delete the tenant + admin document UI pages
 
-These pages are the only consumers of the document-list/detail data-layer functions and the `components/documents/` widgets. Deleting them leaves those functions as unused exports (fine — removed in Task 7).
+These pages are the only consumers of the document-list/detail data-layer functions and the `components/documents/` widgets. Deleting them leaves those functions as unused exports (fine — removed in Task 6).
 
 **Files:**
 - Delete: `app/(tenant)/tenant/documents/page.tsx`, `app/(tenant)/tenant/documents/[documentId]/page.tsx` (whole `tenant/documents/` dir)
@@ -241,9 +122,9 @@ git commit -m "refactor: remove tenant + admin document UI pages"
 
 ---
 
-### Task 4: Delete the public v1 documents API + its keyset-pagination helpers
+### Task 3: Delete the public v1 documents API + its keyset-pagination helpers
 
-`lib/api/cursor.ts` and `lib/api/params.ts` are used **only** by this route (verified). `serializeDocumentRow`/`serializeDocumentDetail` and `listDocumentsByCursor` become unused after this (removed in Task 7).
+`lib/api/cursor.ts` and `lib/api/params.ts` are used **only** by this route (verified). `serializeDocumentRow`/`serializeDocumentDetail` and `listDocumentsByCursor` become unused after this (removed in Task 6).
 
 **Files:**
 - Delete: `app/api/v1/documents/route.ts`, `app/api/v1/documents/[id]/route.ts` (whole `api/v1/documents/` dir)
@@ -287,7 +168,7 @@ git commit -m "refactor: remove public v1 documents API + pagination helpers"
 
 ---
 
-### Task 5: Delete Phase 3A–3C (public /d page, recovery, contacts, coverage/support, email-me)
+### Task 4: Delete Phase 3A–3C (public /d page, recovery, contacts, coverage/support, email-me)
 
 Removes the branded document page, magic-link recovery, marketing contacts, return/warranty window, support-contact, and email-me-this-document features. After this, `getMarketingContacts` and the `documents.ts` public-document region are unused.
 
@@ -360,9 +241,9 @@ git commit -m "refactor: remove Phase 3A-3C (public doc page, recovery, contacts
 
 ---
 
-### Task 6: Delete the ingest endpoint + R2 document storage path
+### Task 5: Delete the ingest endpoint + R2 document storage path
 
-Removes the device→R2 upload endpoint and the ingest guardrail libs. `putDocument`/`presignedDocumentUrl`/`documentStorageKey` become unused (their only other caller, `documents.ts`, was trimmed in Task 5).
+Removes the device→R2 upload endpoint and the ingest guardrail libs. `putDocument`/`presignedDocumentUrl`/`documentStorageKey` become unused (their only other caller, `documents.ts`, was trimmed in Task 4).
 
 **Files:**
 - Delete: `app/api/ingest/route.ts` (and the `api/ingest/` dir)
@@ -403,9 +284,9 @@ git commit -m "refactor: remove device ingest endpoint + R2 document storage pat
 
 ---
 
-### Task 7: Remove the now-unused document read/serialize/search code
+### Task 6: Remove the now-unused document read/serialize/search code
 
-After Tasks 2–6, these producers have no consumers left. Delete them and their tests.
+After Tasks 1–5, these producers have no consumers left. Delete them and their tests.
 
 **Files:**
 - Delete: `lib/documents-search.ts`, `lib/documents-search.test.ts`
@@ -457,9 +338,9 @@ git commit -m "refactor: remove unused document read/serialize/search code"
 
 ---
 
-### Task 8: Drop the removed tables + Phase-3 columns (schema + migration)
+### Task 7: Drop the removed tables + Phase-3 columns (schema + migration)
 
-All code referencing these tables/columns is gone after Tasks 2–7, so they can be dropped. Keep `document` and `usageEvent` (billing).
+All code referencing these tables/columns is gone after Tasks 1–6, so they can be dropped. Keep `document` and `usageEvent` (billing).
 
 **Files:**
 - Modify: `lib/db/schema.ts` — remove table definitions `documentContact`, `marketingContact`, `lookupToken`, `webhookEndpoint`, `webhookDelivery`, and their entries in the exports block. Remove `tenantSettings` columns `supportEmail`, `supportUrl`, `returnWindowDays`, `warrantyPeriodMonths`. **KEEP** `document`, `usageEvent`, and the branding columns (`logoUrl`, `brandColor`, `brandBg`, `brandFg`, `brandMuted`).
@@ -479,7 +360,7 @@ Expected: no results (only `schema.ts` still mentions them, which this task remo
 
 - [ ] **Step 2: Remove the table definitions + column lines from `schema.ts`**
 
-Delete the five `pgTable` blocks (`documentContact`, `marketingContact`, `lookupToken`, `webhookEndpoint`, `webhookDelivery`), their lines in the exports block, and the four `tenantSettings` column definitions. Also check `lib/db/relations.ts` — it has no references to these tables (verified), so it should need no change; re-grep to be sure:
+Delete the five `pgTable` blocks (`documentContact`, `marketingContact`, `lookupToken`, `webhookEndpoint`, `webhookDelivery`), their lines in the exports block, and the four `tenantSettings` column definitions. Also re-check `lib/db/relations.ts` — it has no references to these tables (verified), so it should need no change:
 Run: `grep -n "documentContact\|marketingContact\|lookupToken\|webhookEndpoint\|webhookDelivery" lib/db/relations.ts`
 Expected: no results.
 
@@ -506,13 +387,13 @@ git commit -m "refactor(db): drop document-contact/marketing/lookup/webhook tabl
 
 ---
 
-### Task 9: Final sweep + docs
+### Task 8: Final sweep + docs
 
 Catch any leftover document/print copy and confirm the whole app is green.
 
 **Files:**
 - Modify: `app/(tenant)/tenant/api/page.tsx` — remove/repoint the copy that references `GET /documents` API endpoints (the endpoint is gone; describe the trigger endpoint instead or drop the line).
-- Modify: `README.md` / `AGENTS.md` / `CLAUDE.md` only if they describe the ingest/document flow as current — update the "Device → ingest → document flow" section of `CLAUDE.md` to the trigger-only model.
+- Modify: `CLAUDE.md` — update the "Device → ingest → document flow" section to the trigger-only model (only if it still describes ingest as current).
 
 **Interfaces:**
 - Consumes: nothing.
@@ -522,9 +403,9 @@ Catch any leftover document/print copy and confirm the whole app is green.
 
 Run:
 ```bash
-grep -rn "ingest\|/documents\|document\b" app/(tenant)/tenant/api/page.tsx CLAUDE.md README.md 2>/dev/null | grep -v node_modules
+grep -rn "ingest\|/documents\|document" "app/(tenant)/tenant/api/page.tsx" CLAUDE.md README.md 2>/dev/null | grep -v node_modules
 ```
-Update the tenant API docs page copy and the `CLAUDE.md` "Device → ingest → document flow" section to describe: caller `POST /api/v1/devices/{deviceId}/trigger` with `{ payloadType:"url", value }` → device shows a QR → ACK settles 1 credit. Do not rewrite unrelated docs.
+Update the tenant API docs page copy and the `CLAUDE.md` "Device → ingest → document flow" section to describe: caller `POST /api/v1/devices/{deviceId}/trigger` with the **unchanged** body `{ action:"show_qr", payload:{ url } }` → device shows a QR → ACK settles 1 credit. Do not rewrite unrelated docs.
 
 - [ ] **Step 2: Full green check**
 
@@ -543,15 +424,15 @@ git commit -m "docs: describe trigger-only device flow; remove ingest/document r
 ## Self-Review
 
 **Spec coverage check (against `2026-07-02-trigger-only-device-design.md`):**
-- §1 Trigger API refined to `{ payloadType, value }`, deviceId in path, internal `show_qr` unchanged → **Task 1**. ✅
-- §2 Remove ingest/R2-doc path → **Task 6**; v1 documents API → **Task 4**; public `/d` + `/d/lookup` → **Task 5**; `lib/documents.ts` region, `lib/documents-search`, `lib/lookup` → **Tasks 5 & 7**; Phase 3A–3C features → **Task 5**; webhook subsystem → **Task 2**; document UI + nav → **Tasks 3 & 5**; schema drops (documentContact/marketingContact/lookupToken/webhookEndpoint/webhookDelivery + tenantSettings cols) → **Task 8**; keep `document` + `usageEvent` vestigial → honored (never deleted). ✅
+- §1 Trigger API + request body kept EXACTLY as-is → no task touches `trigger/route.ts` or `trigger-actions.ts` (frozen by Global Constraints). ✅
+- §2 Remove ingest/R2-doc path → **Task 5**; v1 documents API → **Task 3**; public `/d` + `/d/lookup` → **Task 4**; `lib/documents.ts` region, `lib/documents-search`, `lib/lookup` → **Tasks 4 & 6**; Phase 3A–3C features → **Task 4**; webhook subsystem → **Task 1**; document UI + nav → **Tasks 2 & 4**; schema drops (documentContact/marketingContact/lookupToken/webhookEndpoint/webhookDelivery + tenantSettings cols) → **Task 7**; keep `document` + `usageEvent` vestigial → honored (never deleted). ✅
 - §3 Billing untouched → no task touches `lib/billing*`, `invoice`, `perPrintPriceCents`, `getApiUsage`/`serializeUsage`. ✅
 - §4 Kept-unchanged list (device claim/commands/config/firmware, credits, R2 core, branding, stores, audit, auth) → never targeted. ✅
 - Metric repoint explicitly deferred to a follow-up plan → not in this plan by design. ✅
 
-**Placeholder scan:** no "TBD"/"handle edge cases"/"similar to Task N" — every code step shows the actual code or the exact symbols to remove. ✅
+**Placeholder scan:** no "TBD"/"handle edge cases"/"similar to Task N" — every code step shows the actual command or the exact symbols to remove. ✅
 
-**Type consistency:** `validateTriggerBody` keeps its `{ ok, action, payload }` return across Task 1 and the untouched route; `claimDevice`/`getUnclaimedDevices`/`ClaimResult` (Task 5) and `serializeUsage` (Task 7) are preserved for their existing consumers; deletion-order rule ensures no symbol is removed while still imported. ✅
+**Type consistency:** `claimDevice`/`getUnclaimedDevices`/`ClaimResult` (Task 4) and `serializeUsage` (Task 6) are preserved for their existing consumers; the trigger contract (`validateTriggerBody` → `{ action, payload }`) is frozen; the deletion-order rule ensures no symbol is removed while still imported. ✅
 
 ## Deferred / Follow-up
 
