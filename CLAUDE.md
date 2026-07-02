@@ -12,7 +12,8 @@ paper documents with a QR code customers scan to download a digital document.
 - **recharts** charts · **next-themes** light/dark
 - **Neon** (serverless Postgres) + **Drizzle ORM** over `neon-http`
 - **Better Auth** (email/password + organization plugin) — `organization = tenant`
-- **Cloudflare R2** (S3-compatible) for private document image storage
+- **Cloudflare R2** (S3-compatible) for private object storage (tenant branding
+  assets, firmware binaries)
 
 ## Commands
 
@@ -33,7 +34,7 @@ npm run auth:generate # regenerate Better Auth tables → lib/db/auth-schema.gen
 |---|---|
 | `DATABASE_URL` | Neon pooled connection string |
 | `BETTER_AUTH_SECRET` | Better Auth signing secret (`openssl rand -base64 32`) |
-| `BETTER_AUTH_URL` | App base URL; also the prefix of public document links |
+| `BETTER_AUTH_URL` | App base URL |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | Cloudflare R2 |
 
 `.env.example` is the committed template. CLI scripts (seed, drizzle.config) load
@@ -72,26 +73,28 @@ App tables (all FK → `organizationId`): `tenantSettings` (PK=orgId), `store`,
   "@better-auth/kysely-adapter"]` — without it the auth route 500s on a
   bun:sqlite dialect bundling error.
 
-## Device → ingest → document flow
+## Device trigger flow (trigger-only model)
+
+Ditto no longer ingests or hosts documents — customers host their own content
+and pass a URL. The only device-activation path is the trigger API:
 
 1. **Provision**: a device is seeded/created with a one-time `pairingCode`.
    `claimDevice(pairingCode, storeId)` (`lib/documents.ts`) binds it to a store,
    issues a device key (raw key returned **once**; only its SHA-256 hash is
    stored), consumes the pairing code, sets `claimedAt`.
-2. **Ingest**: `POST /api/ingest` authenticated by `Authorization: Bearer
-   <deviceKey>` (NOT a user session). Looks up the device by hashed key, rejects
-   unknown/paused. Accepts the rendered document (multipart `file`, or JSON
-   `{image: base64, mimeType?, deviceId?}`). Uploads to R2 under
-   `documents/{orgId}/{documentId}`, inserts a `document` row with a 40-char nanoid
-   `token` + status `ready`, bumps `device.lastSeenAt`/`status`. Returns
-   `{ token, url }` where `url` = `{BETTER_AUTH_URL}/r/{token}` (the device renders
-   this as a QR).
-3. **Public document**: `app/(public)/r/[token]/page.tsx` — no auth, the **token
-   is the capability**. Looks up by token; if ready, renders the image via a
-   **fresh short-lived presigned R2 GET URL** (`lib/storage.ts`, 5-min TTL —
-   documents are private, never public). First view flips `ready → downloaded` +
-   stamps `downloadedAt` (the "document sent ✓" signal). Unknown token →
-   graceful not-found.
+2. **Trigger**: an authenticated caller (API key with the `devices:trigger`
+   scope, plus a required `Idempotency-Key` header) does
+   `POST /api/v1/devices/{deviceId}/trigger` with body
+   `{ action: "show_qr", payload: { url } }` — `url` points at content the
+   caller hosts themselves. `app/api/v1/devices/[deviceId]/trigger/route.ts`
+   checks device ownership/online status, reserves 1 credit
+   (`lib/credits.ts` `reserveCredit`, lazily reconciling expired holds first),
+   and enqueues a `deviceCommand` row (`type: "trigger"`, `status: "pending"`).
+3. **Poll + render + ack**: the device polls `GET /api/device/commands`
+   (device-key auth) for pending commands, renders a QR from `payload.url`,
+   then `POST /api/device/commands/ack` with `{ commandId, ok }`. A success ack
+   settles the reserved credit (`settleHold`); a failure or expiry releases it
+   (`releaseHold`).
 
 ## Gotchas
 
