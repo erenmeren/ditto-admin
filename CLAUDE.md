@@ -110,4 +110,5 @@ and pass a URL. The only device-activation path is the trigger API:
 
 - Platform admin: **admin@ditto.app** / `123456`
 - Tenant owner: **dana@roastwell.co** / `123456`
-- Org "Roastwell Coffee": 3 stores, 6 devices (mixed status), 30 documents, 2 invoices.
+- Org "Roastwell Coffee": 3 stores, 6 claimed devices (mixed status), 3 unclaimed
+  devices (with pairing codes), and a starter grant of prepaid credits.
