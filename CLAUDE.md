@@ -67,6 +67,15 @@ App tables (all FK → `organizationId`): `tenantSettings` (PK=orgId), `store`,
   Route-group layouts call these to gate access and pass session/org data to `AppShell`.
 - **`middleware.ts`** — optimistic cookie gate on `/admin` + `/tenant` → `/login`.
   Fine-grained role checks run in the layouts (DB available there).
+- **Layout & spacing (dashboard pages).** Every `/admin` + `/tenant` page returns
+  a fragment and inherits the shell's container — never re-pad a page. Chrome comes
+  from three primitives: `PageHeader` (one page title; supports `backHref`/`leading`/
+  `badge`/node `description`), `SectionHeader` (one section title), and `PageSection`
+  (standalone non-Card section, `space-y-3`). Rhythm: page container `max-w-7xl` +
+  `p-4 sm:p-6 lg:p-8` and `space-y-6` between top-level blocks are owned by
+  `AppShell`; section heading→body is `space-y-3`; metric grids `gap-4`; major
+  column splits `gap-6`. Type: h1 `font-display text-2xl font-bold`, h2 `text-lg
+  font-medium`, description `text-sm text-muted-foreground`.
 - **Auth route**: `app/api/auth/[...all]/route.ts` via `toNextJsHandler`.
   Client: `lib/auth-client.ts` (`authClient`, organization plugin).
 - `next.config.ts` sets `serverExternalPackages: ["better-auth",
