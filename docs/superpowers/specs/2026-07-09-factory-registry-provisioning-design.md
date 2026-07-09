@@ -111,6 +111,11 @@ public, so anything else would allow device hijack by polling with a victim's
 serial. A reset or RMA-returned device always goes through the human-approved
 claim path (or an admin explicitly reverts the registry row to `allocated`).
 
+Auto-claim additionally requires the allocation to include a store: an
+allocation without a store stays on the human-claim path (the admin UI states
+this), because a claimed device without a store is invisible to the
+store-scoped device queries.
+
 **Duplicate-serial corner:** if stamping `device.serial` hits the unique index
 (same physical device reset and claimed a second time), the new row's serial is
 left null, a `duplicate-serial` audit event is recorded, and the admin UI shows
