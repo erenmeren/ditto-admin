@@ -68,23 +68,33 @@ normal claimed device.
 
 ### 2. Revert the registry row to `allocated`
 
-There is currently **no UI action for this** — reverting is a direct DB
-update. State this honestly: until a UI revert action exists (tracked as
-future work), an operator runs this by hand against the production database:
+Admin → Inventory → find the serial → **Revert claim…** (only shown on
+`claimed` rows). The action (`revertRegistryClaim` in
+`lib/factory-registry.ts`, via `revertRegistryClaimAction`) refuses with
+"Delete the linked device first." if a `deviceId` is still linked — so step 1
+above must actually be done before this will work — and on success it writes
+a `registry.claim_reverted` audit event (`AUDIT.registryClaimReverted`,
+`lib/audit.ts`) scoped to the allocated org, when the row has one.
+
+Verify first that `allocated_organization_id` / `allocated_store_id` on that
+row are still the correct customer/store (the revert action only clears
+`status` and `claimed_at`, never those allocation columns — that's what
+re-arms the pending install) — if the wrong org/store is allocated, fix that
+in the admin Inventory page's allocate flow instead.
+
+<details>
+<summary>Fallback: direct SQL (only if the UI action is unavailable)</summary>
 
 ```sql
 update factory_device
 set status = 'allocated',
-    device_id = null,
     claimed_at = null
-where serial = '<serial>';
+where serial = '<serial>'
+  and status = 'claimed'
+  and device_id is null;
 ```
 
-Verify first that `allocated_organization_id` / `allocated_store_id` on that
-row are still the correct customer/store (they aren't touched by the update
-above, only by `allocateSerials`/`deallocateSerials` in
-`lib/factory-registry.ts`) — if the wrong org/store is allocated, fix that in
-the admin Inventory page's allocate flow instead of hand-editing those columns.
+</details>
 
 ### 3. Re-run the legitimate install
 
