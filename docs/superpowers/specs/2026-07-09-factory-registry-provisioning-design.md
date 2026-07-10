@@ -111,6 +111,16 @@ public, so anything else would allow device hijack by polling with a victim's
 serial. A reset or RMA-returned device always goes through the human-approved
 claim path (or an admin explicitly reverts the registry row to `allocated`).
 
+**Trade-off (accepted):** during the allocated→installed window, a bare serial
+(public, printed on the box) plus any well-formed pairing code auto-claims the
+device key for that org. This is inherent to zero-touch provisioning under the
+pragmatic-security constraint — the alternative is not-zero-touch. Mitigations:
+the one-shot transition above (the window closes the instant the real device
+claims), the `device.auto_claimed` audit event recorded on every auto-claim,
+and, as a follow-up, a platform-admin alert on auto-claim plus a
+hijack-recovery runbook (delete the rogue device, revert the registry row to
+`allocated`).
+
 Auto-claim additionally requires the allocation to include a store: an
 allocation without a store stays on the human-claim path (the admin UI states
 this), because a claimed device without a store is invisible to the
