@@ -19,16 +19,18 @@ Verified non-impacts: a storeless device keeps working — the trigger API scope
 
 ### 1. Data model
 
-No schema change, no migration. New audit constants in `lib/audit.ts` + friendly labels in the audit humanizer:
+No schema change, no migration. One new audit constant in `lib/audit.ts` + label in `lib/audit-labels.ts`:
 
 - `AUDIT.storeDeleted` (`store.deleted`) — metadata: `{ name, unassignedDeviceCount, disarmedAllocationCount }`.
-- `AUDIT.deviceStoreAssigned` (`device.store_assigned`) — metadata: `{ storeId, storeName }`.
+- Assignment reuses the EXISTING `AUDIT.deviceReassigned` (the admin `reassignDevice` action already records it with `{ storeId }`).
+
+**Pool membership:** `storeId IS NULL AND claimedAt IS NOT NULL`. Unclaimed provisioned devices are also storeless by design and must stay out of the pool (they live in the claim flow via `getUnclaimedDevices`). Bonus: the pool also fixes a pre-existing invisibility — the admin `unassignDevice` action already produces claimed storeless devices that today disappear from every list.
 
 ### 2. Actions (`lib/actions/stores.ts`)
 
 - `deleteStore(storeId)` — tenant-scoped. `requireTenant()`; owner/admin membership check (same rule as create/update); verify the store belongs to the active org. Count the store's devices and its armed factory allocations (`factoryDevice` where `allocatedStoreId = storeId AND status = 'allocated'`) for audit metadata, then `DELETE` the store row — the FKs null out `device.storeId` and `factoryDevice.allocatedStoreId`. Record audit; revalidate `/tenant/stores`, `/tenant`. Returns `{ ok, error? }`.
 - `deleteStoreForOrg(organizationId, storeId)` — platform-admin variant (parity with `createStoreForOrg`): `requirePlatformAdmin()` + `isOrgArchived` guard + same body; revalidates `/admin/customers/[id]`.
-- `assignDeviceToStore(deviceId, storeId)` — tenant-scoped. Owner/admin check; verify BOTH the device and the target store belong to the active org; set `device.storeId`; audit `deviceStoreAssigned`; revalidate stores + tenant pages. Also serves as a general move-between-stores primitive, but v1 UI only surfaces it on the unassigned pool.
+- `assignDeviceToStore(deviceId, storeId)` — tenant-scoped, in `lib/actions/devices.ts` (sibling of the admin-scoped `reassignDevice`, same `ActionResult` conventions). Owner/admin check; verify BOTH the device and the target store belong to the active org; set `device.storeId`; audit `deviceReassigned`; revalidate stores + tenant pages. Also serves as a general move-between-stores primitive, but v1 UI only surfaces it on the unassigned pool.
 
 No dedicated confirmation token: the operation is moderate-risk (devices remain claimed, keyed, and functional; only grouping is lost), so a consequence-listing confirm dialog suffices — no typed-name confirmation.
 
@@ -61,5 +63,5 @@ Deleting a store nulls `allocatedStoreId` on `allocated` rows (DB FK). Auto-clai
 
 ## Testing
 
-- **Unit (vitest, `npm test`):** action authz (member role rejected; cross-org store/device rejected; archived org rejected for admin variant); delete leaves devices with null `storeId` and preserves claim fields; assign sets `storeId` only within the org; audit rows recorded with correct metadata counts.
-- **Manual QA (dev DB + seed):** delete a seeded store with devices → pool appears on `/tenant/stores` with correct rows; dashboard totals unchanged; assign each device to another store → pool empties, devices navigable under the new store; delete a store with an armed allocation → dialog shows the re-arm warning and inventory shows the serial as allocated-without-store; archived customer: no delete button, action refuses; device kept printing (trigger + poll) while unassigned.
+- **Unit (vitest, `npm test`):** the repo has no DB-action test harness — actions are thin Drizzle wrappers and are QA'd manually like all existing actions. Unit coverage = pure logic only: the `AUDIT_LABELS` completeness test (`lib/audit-labels.test.ts`) already fails if `storeDeleted` lands without a label (built-in TDD hook).
+- **Manual QA:** ⚠️ `.env.local` points at PRODUCTION Neon — `npm run db:seed` is FORBIDDEN (a previous reseed wiped the physical HIL device). QA uses a disposable store: in the Roastwell org create "QA Temp" store → provision a virtual device into it → delete the store → pool appears on `/tenant/stores`; dashboard totals unchanged; assign the device to another store → pool empties, device navigable under the new store; re-delete "QA Temp" empty → no pool section; archived customer: no delete button, admin action refuses; delete dialog shows the re-arm warning when an armed allocation exists (verify count query manually if no armed serial is available). Never touch the Downtown Flagship store (physical device b580 lives there).
