@@ -72,9 +72,11 @@ SQL round trip (`count(*) over ()`); page size 50 (module constant).
   carry id, name, serial, storeId, storeName (null for pool), effective
   status, lastSeen ISO, and `counts` holds the five tab totals for the
   current `q`. Claimed devices only (`claimedAt IS NOT NULL`).
-- Effective status in SQL must mirror `effectiveDeviceStatus` exactly: the
-  online threshold constant is exported from `lib/device-status.ts` and
-  injected into the SQL interval — one source of truth, no duplicated number.
+- Status semantics: filter and display use the STORED `device.status` column —
+  exactly what every existing tenant page shows (`buildTenant` maps the raw
+  column; the daily reconcile cron flips stale rows offline). Re-deriving an
+  effective status here would make the fleet list disagree with the store
+  detail pages.
 - Search: `ILIKE '%' || q || '%'` with `%`/`_`/`\` escaped in `q` first.
   No new indexes or extensions: per-org row counts (~2K/4K) under the
   existing `organizationId` indexes make ILIKE scans cheap.
@@ -101,10 +103,15 @@ SQL round trip (`count(*) over ()`); page size 50 (module constant).
 - Pages stay server components: read `searchParams`, call the data function,
   render. Layout follows the CLAUDE.md dashboard rhythm (PageHeader, fragment
   return, `space-y` conventions).
-- Devices page actions reuse existing pieces: pool assign = the select+assign
-  control from the current `UnassignedDevices` component (extracted/adapted);
-  move = compact dialog calling `assignDeviceToStore` (tenant-gated:
-  requireTenant + owner/admin, exactly like the existing controls).
+- Devices page actions (assign for pool rows, move for assigned rows) share
+  one `StorePickerDialog`: a searchable Command-combobox of store names —
+  a plain 2,000-entry Select would recreate the scale problem inside the
+  dialog. Options (id + name only) load lazily via a tenant-gated server
+  action when the dialog opens; selection calls the existing
+  `assignDeviceToStore` (requireTenant + owner/admin). The per-store-page
+  controls (`UnassignedDevices` on Stores today, `DeviceMoveControl` on the
+  device detail page) keep their current UX; `UnassignedDevices` is deleted
+  together with its Stores-page section when the Devices page ships.
 - Empty states: "No stores match", "No devices match", per-tab phrasing for
   an empty pool ("No unassigned devices").
 
