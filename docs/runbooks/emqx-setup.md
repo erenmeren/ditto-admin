@@ -12,14 +12,30 @@ done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
 - Console → API Keys → create. → `EMQX_API_KEY` / `EMQX_API_SECRET`.
 - The HTTP API base (`https://<host>:8443/api/v5`) → `EMQX_API_URL`.
 
-## 3. JWT authentication
-- Console → Access Control → Authentication → add **JWT**.
-- Algorithm **HS256**, secret = `MQTT_JWT_SECRET` (`openssl rand -base64 32`).
-- Enable ACL-from-JWT so the `acl.{sub,pub}` claims are enforced.
-- **Verify EMQX Serverless supports JWT auth + ACL claims on your plan.**
-  If not, fall back to per-device username/password provisioned via the
-  built-in-database authenticator at device-claim time (Plan B in the spec) —
-  this changes `mintDeviceMqttJwt`/`buildMqttConfigBlock` and the claim flow.
+## 3. Authentication — built-in database (Serverless does NOT support JWT)
+- Console → Access Control → Authentication → add **Password-Based → Built-in Database**.
+- Password hashing: default (bcrypt/sha256) is fine — the cloud provisions
+  credentials via the management API; nothing to configure per-device here.
+- Credentials are provisioned automatically by the app at device-claim time
+  (`provisionDeviceMqtt` → `POST /api/v5/authentication/password_based:built_in_database/users`,
+  `{user_id: deviceId, password: <device key>, is_superuser: false}`), and deleted
+  on device delete/unclaim. **The device's MQTT password is its device key**
+  (the same key it uses for HTTP `Authorization: Bearer`), username = deviceId.
+
+## 3b. Authorization — one global ACL rule with a placeholder
+- Console → Access Control → Authorization → **Built-in Database**.
+- Add a single rule that confines every device to its own topics using the
+  `${clientid}` placeholder:
+  - allow **subscribe** to `d/${clientid}/cmd`
+  - allow **publish** to `d/${clientid}/ack` and `d/${clientid}/hb`
+  - (a catch-all deny is the default)
+- Because username = clientId = deviceId, this one rule isolates every device
+  with no per-device ACL provisioning.
+- **Validation:** after setup, confirm device A cannot subscribe to
+  `d/<deviceB>/cmd` (a leaked credential must not reach another device's topics).
+  If the Serverless tier does not honor `${clientid}` placeholders in built-in
+  authorization, fall back to per-device ACL provisioning via the management API
+  in `provisionDeviceMqtt` (contingency — not built by default).
 
 ## 4. Data-Integration webhooks (broker → cloud)
 Create three HTTP-action webhooks, each sending header
@@ -37,15 +53,23 @@ Create three HTTP-action webhooks, each sending header
   `<APP_URL>/api/mqtt/presence`, body includes `event` and `clientid`.
 
 ## 5. Set env vars
-Set all `EMQX_*` / `MQTT_*` vars in Vercel (prod) and `.env.local` (local),
-then redeploy. Validate with the desk device (b580): trigger via the public
-API and confirm the QR renders in < 1 s, then kill the broker connection and
-confirm HTTP polling resumes.
+Set the following required env vars in Vercel (prod) and `.env.local` (local),
+then redeploy:
+- `EMQX_API_URL` — EMQX HTTP API base (`https://<host>:8443/api/v5`)
+- `EMQX_API_KEY` / `EMQX_API_SECRET` — management credentials
+- `EMQX_WEBHOOK_SECRET` — shared header secret for inbound webhooks
+- `MQTT_BROKER_HOST` — connection host (`xxxx.eu-central-1.emqxsl.com`)
+- `MQTT_BROKER_PORT` — TLS listener port (`8883`)
+
+Validate with the desk device (b580): trigger via the public API and confirm
+the QR renders in < 1 s, then kill the broker connection and confirm HTTP
+polling resumes.
 
 ## Notes
-- The per-device MQTT JWT has a 30-day TTL and is only re-issued on a full 200
-  `/api/device/config` response — a 304 (not-modified) does NOT refresh it.
-  Firmware must perform a periodic full fetch (without `If-None-Match`) well
-  inside the 30-day window to pick up a fresh JWT, or the broker connection
-  will start rejecting it and the device will silently fall back to HTTP
-  polling.
+- Device credentials (username = deviceId, password = device key) are
+  provisioned at claim time and persist until device deletion or unclaim.
+  No TTL, no re-issue cycle: the broker trusts the built-in DB and the app
+  trusts the device's device key (same used for HTTP auth) — both sides in sync.
+- If a device's credential is somehow compromised, delete and re-claim the
+  device to rotate its key; the old entry in EMQX will be cleaned up via
+  the management API.
