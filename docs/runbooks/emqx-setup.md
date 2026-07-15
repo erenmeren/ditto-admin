@@ -25,7 +25,9 @@ done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
 Create three HTTP-action webhooks, each sending header
 `x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`:
 - **ack:** rule `SELECT payload, clientid FROM "d/+/ack"` → POST `<APP_URL>/api/mqtt/ack`,
-  body = the message payload JSON.
+  body = `{"clientid": clientid, ...payload}`. The `clientid` is mandatory — the
+  route scopes the ack update to that device's own commands, and rejects the
+  request with 400 if it's missing.
 - **heartbeat:** rule `SELECT payload, clientid FROM "d/+/hb"` → POST
   `<APP_URL>/api/mqtt/heartbeat`, body = `{"clientid": clientid, ...payload}`.
 - **presence:** events `client.connected`, `client.disconnected` → POST
@@ -36,3 +38,11 @@ Set all `EMQX_*` / `MQTT_*` vars in Vercel (prod) and `.env.local` (local),
 then redeploy. Validate with the desk device (b580): trigger via the public
 API and confirm the QR renders in < 1 s, then kill the broker connection and
 confirm HTTP polling resumes.
+
+## Notes
+- The per-device MQTT JWT has a 30-day TTL and is only re-issued on a full 200
+  `/api/device/config` response — a 304 (not-modified) does NOT refresh it.
+  Firmware must perform a periodic full fetch (without `If-None-Match`) well
+  inside the 30-day window to pick up a fresh JWT, or the broker connection
+  will start rejecting it and the device will silently fall back to HTTP
+  polling.
