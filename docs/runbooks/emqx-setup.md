@@ -25,11 +25,14 @@ done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
 Create three HTTP-action webhooks, each sending header
 `x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`:
 - **ack:** rule `SELECT payload, clientid FROM "d/+/ack"` → POST `<APP_URL>/api/mqtt/ack`,
-  body = `{"clientid": clientid, ...payload}`. The `clientid` is mandatory — the
-  route scopes the ack update to that device's own commands, and rejects the
-  request with 400 if it's missing.
+  body = `{...payload, "clientid": clientid}` (order matters — the broker-injected
+  `clientid` must be spread LAST so it wins over any `clientid` a device might put
+  in its own payload; the route trusts `clientid` for device-ownership scoping,
+  so a device-controlled override would defeat that check). The `clientid` is
+  mandatory — the route scopes the ack update to that device's own commands, and
+  rejects the request with 400 if it's missing.
 - **heartbeat:** rule `SELECT payload, clientid FROM "d/+/hb"` → POST
-  `<APP_URL>/api/mqtt/heartbeat`, body = `{"clientid": clientid, ...payload}`.
+  `<APP_URL>/api/mqtt/heartbeat`, body = `{...payload, "clientid": clientid}`.
 - **presence:** events `client.connected`, `client.disconnected` → POST
   `<APP_URL>/api/mqtt/presence`, body includes `event` and `clientid`.
 
