@@ -1,0 +1,38 @@
+# EMQX Cloud Serverless — Setup Runbook
+
+One-time setup to activate the MQTT device transport. Until these steps are
+done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
+
+## 1. Create the deployment
+- EMQX Cloud → Serverless → region **eu-central-1 (Frankfurt)**.
+- Note the connection host (`xxxx.eu-central-1.emqxsl.com`) → `MQTT_BROKER_HOST`.
+- TLS listener is on port **8883** → `MQTT_BROKER_PORT`.
+
+## 2. API key (for HTTP publish)
+- Console → API Keys → create. → `EMQX_API_KEY` / `EMQX_API_SECRET`.
+- The HTTP API base (`https://<host>:8443/api/v5`) → `EMQX_API_URL`.
+
+## 3. JWT authentication
+- Console → Access Control → Authentication → add **JWT**.
+- Algorithm **HS256**, secret = `MQTT_JWT_SECRET` (`openssl rand -base64 32`).
+- Enable ACL-from-JWT so the `acl.{sub,pub}` claims are enforced.
+- **Verify EMQX Serverless supports JWT auth + ACL claims on your plan.**
+  If not, fall back to per-device username/password provisioned via the
+  built-in-database authenticator at device-claim time (Plan B in the spec) —
+  this changes `mintDeviceMqttJwt`/`buildMqttConfigBlock` and the claim flow.
+
+## 4. Data-Integration webhooks (broker → cloud)
+Create three HTTP-action webhooks, each sending header
+`x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`:
+- **ack:** rule `SELECT payload, clientid FROM "d/+/ack"` → POST `<APP_URL>/api/mqtt/ack`,
+  body = the message payload JSON.
+- **heartbeat:** rule `SELECT payload, clientid FROM "d/+/hb"` → POST
+  `<APP_URL>/api/mqtt/heartbeat`, body = `{"clientid": clientid, ...payload}`.
+- **presence:** events `client.connected`, `client.disconnected` → POST
+  `<APP_URL>/api/mqtt/presence`, body includes `event` and `clientid`.
+
+## 5. Set env vars
+Set all `EMQX_*` / `MQTT_*` vars in Vercel (prod) and `.env.local` (local),
+then redeploy. Validate with the desk device (b580): trigger via the public
+API and confirm the QR renders in < 1 s, then kill the broker connection and
+confirm HTTP polling resumes.
