@@ -13,38 +13,53 @@ done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
 - The HTTP API base (`https://<host>:8443/api/v5`) → `EMQX_API_URL`.
 
 ## 3. Authentication — built-in database (Serverless does NOT support JWT)
-- Console → Access Control → Authentication → add **Password-Based → Built-in Database**.
-- Password hashing: default (bcrypt/sha256) is fine — the cloud provisions
-  credentials via the management API; nothing to configure per-device here.
+- **The built-in-database password authenticator is PRE-CREATED on Serverless** —
+  no console step needed. Verify: `GET {EMQX_API_URL}/authentication/password_based%3Abuilt_in_database/users`
+  returns `200` with `{"data":[],...}`.
+- **IMPORTANT — encode the colon.** Serverless is a namespaced/multi-tenant
+  deployment: the API key can `publish` and manage this authenticator's users,
+  but the path's authenticator id colon MUST be percent-encoded as `%3A`. The
+  literal-colon path (`password_based:built_in_database`) returns **403**; the
+  encoded path (`password_based%3Abuilt_in_database`) returns 200. (This is why
+  `emqxAuthUsersBase()` in `lib/mqtt.ts` uses `%3A`.)
 - Credentials are provisioned automatically by the app at device-claim time
-  (`provisionDeviceMqtt` → `POST /api/v5/authentication/password_based%3Abuilt_in_database/users`,
-  `{user_id: deviceId, password: <device key>, is_superuser: false}`), and deleted
-  on device delete/unclaim. **The device's MQTT password is its device key**
+  (`provisionDeviceMqtt` → `POST .../authentication/password_based%3Abuilt_in_database/users`,
+  `{user_id: deviceId, password: <device key>, is_superuser: false}` → `201`;
+  a duplicate `409` → `PUT .../users/{deviceId}` updates the password), and
+  deleted on device delete/unclaim (`DELETE .../users/{deviceId}` → `204`, `404`
+  treated as already-gone). **The device's MQTT password is its device key**
   (the same key it uses for HTTP `Authorization: Bearer`), username = deviceId.
+  Verified live against the deployment API (201/409/204/404 all behave).
 
-## 3b. Authorization — one global ACL rule with a placeholder
-- Console → Access Control → Authorization → **Built-in Database**.
-- Add a single rule that confines every device to its own topics using the
-  `${username}` placeholder:
-  - allow **subscribe** to `d/${username}/cmd`
-  - allow **publish** to `d/${username}/ack` and `d/${username}/hb`
-  - (a catch-all deny is the default)
-- Use `${username}`, not `${clientid}`. `${username}` is the authenticated
-  identity — it's the value verified against the built-in-DB password (the
-  device key) at connect time. `${clientid}` is client-supplied and is NOT
-  verified against the authenticated username by default, so a device holding
-  one valid credential could connect with its own `username` (to pass auth)
-  but a spoofed `clientid` and reach another device's topics if isolation were
-  keyed on it.
-- Because username = deviceId (assigned by the app, not the client), this one
-  rule isolates every device with no per-device ACL provisioning.
-- **Validation:** after setup, confirm device A cannot subscribe to
-  `d/<deviceB>/cmd` (a leaked credential must not reach another device's topics).
-  Also run the spoof test in step 6 below (valid credential, mismatched
+## 3b. Authorization — one global `${username}` ACL rule (set via API)
+The admin authz endpoints (`/authorization/sources`, `/authorization/settings`)
+return **403** for the namespaced Serverless key, but the built-in-DB **all-rules**
+endpoint is accessible. Set one global rule set with a **catch-all deny** so
+isolation holds regardless of the (inaccessible) no-match default:
+
+```bash
+curl -X POST -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+  -H 'Content-Type: application/json' \
+  "$EMQX_API_URL/authorization/sources/built_in_database/rules/all" \
+  -d '{"rules":[
+    {"topic":"d/${username}/cmd","permission":"allow","action":"subscribe"},
+    {"topic":"d/${username}/ack","permission":"allow","action":"publish"},
+    {"topic":"d/${username}/hb","permission":"allow","action":"publish"},
+    {"topic":"#","permission":"deny","action":"all"}
+  ]}'   # → 204
+```
+
+- Use `${username}`, NOT `${clientid}`. `${username}` is the authenticated
+  identity (verified against the built-in-DB password = device key at connect).
+  `${clientid}` is client-supplied and NOT verified against the username by
+  default, so keying isolation on it would be spoofable. Since username =
+  deviceId, this one rule isolates every device — no per-device ACL needed.
+- The trailing `deny #` makes a topic that matches none of the allow rules
+  denied, so a device can only ever reach `d/<its own username>/…`.
+- Verify: `GET {EMQX_API_URL}/authorization/sources/built_in_database/rules/all`
+  shows the four rules. Confirmed applied on the live deployment (2026-07-16).
+- **HIL validation:** run the spoof test in step 6 (valid credential, mismatched
   `clientid`) to confirm isolation genuinely keys on `username`, not `clientid`.
-  If the Serverless tier does not honor `${username}` placeholders in built-in
-  authorization, fall back to per-device ACL provisioning via the management API
-  in `provisionDeviceMqtt` (contingency — not built by default).
 
 ## 4. Data-Integration webhooks (broker → cloud)
 Create three HTTP-action webhooks, each sending header
