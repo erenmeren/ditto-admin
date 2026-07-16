@@ -17,7 +17,7 @@ done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
 - Password hashing: default (bcrypt/sha256) is fine — the cloud provisions
   credentials via the management API; nothing to configure per-device here.
 - Credentials are provisioned automatically by the app at device-claim time
-  (`provisionDeviceMqtt` → `POST /api/v5/authentication/password_based:built_in_database/users`,
+  (`provisionDeviceMqtt` → `POST /api/v5/authentication/password_based%3Abuilt_in_database/users`,
   `{user_id: deviceId, password: <device key>, is_superuser: false}`), and deleted
   on device delete/unclaim. **The device's MQTT password is its device key**
   (the same key it uses for HTTP `Authorization: Bearer`), username = deviceId.
