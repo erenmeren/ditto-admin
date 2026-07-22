@@ -2,8 +2,9 @@
 
 # Ditto Admin
 
-Multi-tenant admin console for **Ditto**, a digital-document SaaS. Printers replace
-paper documents with a QR code customers scan to download a digital document.
+Multi-tenant admin console for **Ditto**, a trigger-to-screen SaaS. In-store
+devices show a QR code on demand; customers scan it to open whatever content
+the caller chose to show (trigger-only model — Ditto hosts nothing).
 
 ## Stack
 
@@ -46,14 +47,16 @@ env at load time (ESM imports are hoisted, so an inline `dotenv` call runs too l
 Better Auth core: `user` (+`role`), `session` (+`activeOrganizationId`), `account`,
 `verification`. Org plugin: `organization`, `member`, `invitation`.
 App tables (all FK → `organizationId`): `tenantSettings` (PK=orgId), `store`,
-`device`, `document`, `invoice`. Relations in `lib/db/relations.ts`.
+`device`, `deviceCommand`, `apiKey`, `creditBalance`/`creditLedger`,
+`deviceUsageMonth`, `firmwareRelease`, `factoryDevice`, `auditLog`, `alert`.
+Relations in `lib/db/relations.ts`.
 
 - **`organization` = tenant.** Tenant roles (owner/admin/member) live on `member`.
 - **Platform/super-admin is NOT an org membership** — it's `user.role =
   'platform_admin'` (Better Auth `additionalFields`, `input:false`).
 - **Money is stored in integer cents** (`perPrintPriceCents`, `unitPriceCents`,
   `amountDueCents`); the data layer converts to dollars for the UI.
-- Indexes: `document.token` (unique), `device.pairingCode` (unique),
+- Indexes: `device.pairingCode` (unique),
   `device.deviceKeyHash`, every `organizationId`.
 
 ## Architecture
@@ -62,7 +65,7 @@ App tables (all FK → `organizationId`): `tenantSettings` (PK=orgId), `store`,
   UI always used; bodies are real Drizzle queries. Tenant-panel fns take
   `organizationId` (active tenant); super-admin fns span all orgs. DB→view-model
   conversions (cents→dollars, `lastSeenAt`→ISO `lastSeen`, status mapping,
-  document counts/series derived from the `document` table) all happen here.
+  activation counts/series derived from acked trigger commands) all happen here.
 - **`lib/session.ts`** — `getContext()`, `requireTenant()`, `requirePlatformAdmin()`.
   Route-group layouts call these to gate access and pass session/org data to `AppShell`.
 - **`middleware.ts`** — optimistic cookie gate on `/admin` + `/tenant` → `/login`.
@@ -88,7 +91,7 @@ Ditto no longer ingests or hosts documents — customers host their own content
 and pass a URL. The only device-activation path is the trigger API:
 
 1. **Provision**: a device is seeded/created with a one-time `pairingCode`.
-   `claimDevice(pairingCode, storeId)` (`lib/documents.ts`) binds it to a store,
+   `claimDevice(pairingCode, storeId)` (`lib/device-claim.ts`) binds it to a store,
    issues a device key (raw key returned **once**; only its SHA-256 hash is
    stored), consumes the pairing code, sets `claimedAt`.
 2. **Trigger**: an authenticated caller (API key with the `devices:trigger`
