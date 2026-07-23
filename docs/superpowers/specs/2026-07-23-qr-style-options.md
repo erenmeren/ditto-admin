@@ -39,3 +39,86 @@
 
 ## Out of scope
 Per-object styles, gradients, logos-inside-QR, inverted (light-on-dark) QRs.
+
+---
+
+## Addendum: background corner + shadow (2026-07-23, branch `feat/qr-corner-shadow`)
+
+**Bug report:** the branding studio preview showed the QR's background plate
+with rounded corners and a soft drop-shadow; the device renders it square and
+flat. Root cause — that rounding/shadow was hard-coded chrome in two React
+call sites, not derived from any config:
+- `components/device-preview/printer-preview.tsx` `QrObject` — the wrapper
+  `<div>` around every QR render (idle/qr/setup screens in the studio
+  canvas + filmstrip) always set `borderRadius: cq(14|32)` and, for the
+  non-compact case, a fixed `boxShadow`.
+- `components/device-pin-control.tsx` — the pinned-QR `<QrSvg>` on the tenant
+  device detail page always carried the Tailwind class `rounded-lg` (no
+  shadow there before this change).
+
+**Decisions (locked):** same org-wide model as shape/fg/bg — two more fields
+alongside them in the same top-level config JSON block, no migration:
+- `qrCorner: "square" | "rounded"` (default `"rounded"` — preserves today's
+  look for existing tenants).
+- `qrShadow: boolean` (default `false` — matches the device's actual
+  shadowless render; existing tenants get the corrected default, not the old
+  hard-coded `true`).
+- Both sanitize independently and permissively: unknown/malformed `qrCorner`
+  → `"rounded"`; non-boolean `qrShadow` → `false`. No cross-field validation
+  (unlike the retired fg/bg contrast guard — these have no scannability
+  implication).
+
+**Work done:**
+1. `lib/printer-layout.ts` — `QrStyle` + `PrinterConfig` gain `qrCorner`/
+   `qrShadow`; `DEFAULT_QR_STYLE` extended; `sanitizeQrStyle` coerces both.
+   `normalizePrinterConfig`/`migrateV2ToConfig` needed no further change —
+   both already spread `sanitizeQrStyle(cfg)` / `DEFAULT_QR_STYLE`. Unit
+   tests: defaults for garbage/missing input, valid pass-through, unknown
+   corner → `"rounded"`, non-boolean shadow → `false`, explicit `false` kept,
+   plus `normalizePrinterConfig` defaults/pass-through/v2-migration/round-trip
+   coverage mirroring the existing shape/fg/bg tests.
+2. `lib/qr-svg.ts` — new `QR_CORNERS`/`QrCorner` + pure `qrBackgroundRadius(dim,
+   corner)` helper (~6% of `dim` when rounded, 0 when square).
+   `components/qr-svg.tsx` — `QrSvg` gains `corner`/`shadow` props; the
+   background `<rect>` gets `rx={qrBackgroundRadius(...)}` and, when
+   `shadow`, an SVG `<filter>` (`feDropShadow`) referenced via a
+   collision-safe id (`useId()` with `:` stripped — raw `useId()` output
+   isn't a legal bare token inside `url(#...)`).
+3. **Fix for the reported bug** — both hard-coded call sites now read the org
+   setting instead of a constant:
+   - `printer-preview.tsx` `QrObject`: `borderRadius`/`boxShadow` are now
+     `config.qrCorner === "rounded" ? … : 0` / `config.qrShadow ? … :
+     undefined`. The inner `<QrSvg>` gets `corner={config.qrCorner}` (for
+     architectural consistency — every `QrSvg` render reflects the real
+     style) but `shadow={false}` explicitly, so the shadow is painted once
+     (at the wrapper) rather than doubled.
+   - `device-pin-control.tsx`: the previously-static `rounded-lg` class is
+     now `cn(qrCorner === "rounded" ? "rounded-lg" : "rounded-none", qrShadow
+     && "shadow-md")`; new `qrCorner`/`qrShadow` props threaded down from the
+     device detail page's existing `getOrgQrStyle()` call (`qrStyle.qrCorner`
+     / `qrStyle.qrShadow`), same pattern as the existing `qrShape`/`qrFg`/
+     `qrBg` props.
+4. Branding studio — QR controls moved out of the Theme tab into their own
+   tab (`ControlPanel`'s `Tabs`: Theme / **QR** / Screen, `QrCode` icon,
+   between the other two — follows the existing `TabsTrigger`/`TabsContent`
+   pattern already used for Theme/Screen). `QrStylePanel` now renders two
+   sections: "Shape" (unchanged shape swatches + fg/bg color fields) and a
+   new "Background plate" section — a 2-up square/rounded swatch picker
+   (mirrors the 4-up shape-swatch pattern) plus a `Switch` for "Drop shadow"
+   (mirrors the existing screen-colors-override switch pattern).
+5. `lib/device-config.test.ts` — extended the existing "computeConfigVersion
+   — QR style" describe block with a case for `qrCorner` changing within
+   `printerScreens` (mirrors the existing qrShape/qrFg/qrBg case; both fields
+   live top-level inside the same JSON blob with no dedicated ETag input, so
+   they're covered by the "any renderable input changes" test regardless —
+   this pins one of the two new fields down explicitly, same rationale as
+   the original qrShape/qrFg/qrBg case).
+
+**Gates:** `tsc --noEmit` 0 errors; `vitest run` 373/373 (was 372, +9 new
+qrCorner/qrShadow cases, 1 pre-existing `toEqual` snapshot updated for the
+2 new `QrStyle` fields); `next build` clean; `eslint` — identical 6
+pre-existing problems (0 new), diffed against the pre-branch tree.
+
+**Out of scope:** the firmware counterpart (device-side corner/shadow
+rendering to actually vary, not just match today's square/flat default) —
+tracked separately, same split as the original spec's firmware doc.
