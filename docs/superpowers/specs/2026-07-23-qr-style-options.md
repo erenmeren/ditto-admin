@@ -230,3 +230,143 @@ diffed line-for-line against the pre-branch tree.
 
 **Out of scope:** the firmware counterpart (device-side shadow/glow
 rendering) — tracked separately, same split as the prior two addenda.
+
+---
+
+## Addendum: continuous corner-radius slider + dim-relative shadow math (2026-07-24, branch `feat/qr-corner-slider`)
+
+**Bug report:** the device's corner radius and shadow look visibly different
+from the branding studio preview, even though both claim to read the same
+`qrCornerRadius`/`qrShadowMode`/`qrShadowStrength`/`qrShadowColor` config.
+Product's ask: make the preview's formulas canonical, pure, and documented
+well enough that firmware can copy them exactly — the preview is the source
+of truth, not the other way around.
+
+**Root causes found (cloud side):**
+1. `qrCorner` was a 2-value `"square" | "rounded"` enum — too coarse for
+   firmware to match a continuous on-device rounding without guessing an
+   arbitrary intermediate radius.
+2. The shadow's blur/offset were **fixed px constants**
+   (`shadowBlurPx(strength) = 4 + 20×(strength/100)`, offset always `2`),
+   completely independent of how large the QR plate was actually rendered.
+   The corner radius, by contrast, was already `dim`-relative
+   (`qrBackgroundRadius`, ~6% of `dim`). A fixed-px shadow next to a
+   dim-relative corner radius drifts apart at every zoom level/render
+   context (studio filmstrip thumbnail vs. full canvas vs. the 128px pinned
+   card vs. the device's native QR) — the most likely explanation for "looks
+   different."
+3. Two preview call sites had literal hard-coded chrome instead of deriving
+   from config at all: `printer-preview.tsx` `QrObject`'s `borderRadius` was
+   `cq(14|32)` (compact/full) regardless of the corner setting once it
+   became non-boolean, and `device-pin-control.tsx`'s pinned-QR card carried
+   a static Tailwind `rounded-lg`/`rounded-none` class pair.
+
+**Decisions (locked):**
+- `qrCorner: "square" | "rounded"` → **`qrCornerRadius: 0..100` int** (a
+  slider; 0 = square). Sanitize: a valid stored `qrCornerRadius` always wins
+  (clamped + rounded); otherwise migrate the legacy enum — `"rounded"` → 24,
+  `"square"` → 0; anything else (absent, garbage, unrecognized) → the
+  default, which is now **24** (not 0) — existing tenants saw "rounded"
+  before this change, and 24 is the slider value that reproduces that look,
+  so migrated tenants see no visual change.
+- One canonical, pure geometry module, extended in `lib/qr-svg.ts`:
+  - `qrCornerRadiusPx(dim, v) = round(dim × 0.30 × (v/100))` — 0 at v=0
+    (square), ~30% of `dim` at v=100 (pill-ish). Every render site computes
+    its own `dim` (its own real pixel size) and calls this one function —
+    no more hard-coded `rx`/`rounded-lg`/`cq(14|32)` anywhere.
+  - `qrShadowParams(mode, strength, dim) → {blurPx, offsetYPx, alpha,
+    spreadPx}` — the single formula both shadow renderers derive from
+    (previously duplicated, independently, in each). Every px field scales
+    linearly with `dim`; `dim = 100` is the documented reference unit where
+    the numbers reduce to the old fixed constants (blur 4..24px, offset
+    2px, alpha 0.25..0.75), keeping the fix low-risk at typical render
+    sizes while actually fixing the cross-context drift.
+  - `qrShadowCss(mode, strength, color, dim, unit?)` — CSS `box-shadow`
+    string built from `qrShadowParams`; `unit` defaults to plain `${px}px`
+    but accepts a container-relative formatter (e.g. the studio canvas's
+    `cq()`) so every dimension on a card — padding, border-radius, shadow —
+    moves in lockstep at any zoom level. `qrShadowBoxShadow(mode, strength,
+    color, dim)` is a thin convenience wrapper with the default unit, for
+    the two fixed-real-pixel consumers (pin card, studio swatches).
+  - `qrShadowFilterSpec(mode, strength, color, dim)` — SVG `<filter>`
+    parameters, also derived from `qrShadowParams` (`dim` here is the SVG's
+    own viewBox dimension; stdDeviation = blurPx/2, the standard CSS-blur↔
+    SVG-stdDeviation relationship).
+  - Every formula function carries a `FIRMWARE PARITY: mirrored in
+    ditto-firmware qr_style.c — keep in sync` doc comment.
+- `qrBackgroundRadius` (the old enum-based corner helper) is removed
+  entirely, not deprecated alongside the new function — there is exactly one
+  corner-radius formula now.
+
+**Work done:**
+1. `lib/qr-svg.ts` — `QR_CORNERS`/`QrCorner` removed; new
+   `qrCornerRadiusPx`. Shadow section rewritten around `qrShadowParams` (new
+   `QrShadowParams` interface); `qrShadowBoxShadow`/`qrShadowFilterSpec` both
+   gained a required `dim` param and now delegate to `qrShadowParams`
+   instead of computing blur/offset/alpha independently; new `qrShadowCss`
+   (the unit-parameterized CSS builder both `qrShadowBoxShadow` and
+   `printer-preview.tsx` use).
+2. `lib/printer-layout.ts` — `QrStyle`/`PrinterConfig.qrCorner` →
+   `qrCornerRadius: number`; `DEFAULT_QR_STYLE.qrCornerRadius = 24`; new
+   `sanitizeQrCornerRadius` (numeric win → legacy-enum migration → default
+   24); `sanitizeQrStyle` wired to it. `normalizePrinterConfig`/
+   `migrateV2ToConfig` needed no further change (both already spread
+   `sanitizeQrStyle(cfg)`/`DEFAULT_QR_STYLE`).
+3. `components/qr-svg.tsx` — `corner: QrCorner` prop → `cornerRadius:
+   number`; background `<rect>` `rx` now `qrCornerRadiusPx(dim,
+   cornerRadius)`. `size`/`dim` computation hoisted above the early
+   `if (!built) return null` (hooks can't follow a conditional return), so
+   the shadow-filter `useMemo` can depend on `dim`.
+4. `components/device-preview/printer-editor/printer-preview.tsx`
+   `QrObject` — `dim = min(object.w, object.h) × 720` (the card's own size
+   on the 720-reference canvas, the same basis `cq()` converts from);
+   `borderRadius = cq(qrCornerRadiusPx(dim, config.qrCornerRadius))`;
+   `boxShadow = qrShadowCss(..., dim, cq)` so the shadow scales with the
+   canvas exactly like the corner radius and padding already did. Inner
+   `<QrSvg>` gets `cornerRadius={config.qrCornerRadius}` (architectural
+   consistency, same as before).
+5. `components/device-pin-control.tsx` — `qrCorner?: QrCorner` prop →
+   `qrCornerRadius?: number`; the static `rounded-lg`/`rounded-none`
+   Tailwind class pair (and the now-unused `cn` import) replaced by an
+   inline `borderRadius: qrCornerRadiusPx(PIN_QR_DIM_PX, …)` /
+   `boxShadow: qrShadowBoxShadow(…, PIN_QR_DIM_PX)`, `PIN_QR_DIM_PX = 128`
+   matching the `size-32` Tailwind utility already on the element. Device
+   detail page (`app/(tenant)/tenant/stores/[storeId]/[deviceId]/page.tsx`)
+   prop updated to match.
+6. `components/branding-studio/branding-studio.tsx` `QrStylePanel` —
+   the 2-up square/rounded swatch picker replaced with a "Corner radius"
+   `Slider` (0–100, same `ui/slider` pattern as the existing shadow
+   "Intensity" control) plus a small live preview swatch using
+   `qrCornerRadiusPx(20, qrCornerRadius)`. The shadow-mode swatch preview's
+   `qrShadowBoxShadow` call gained its new required `dim` arg (20, matching
+   the swatch's own `size-5` box).
+7. `components/device-preview/printer-editor/use-printer-editor.ts` —
+   `setShared`'s field whitelist swaps `"qrCorner"` for `"qrCornerRadius"`.
+8. Tests:
+   - `lib/qr-svg.test.ts` — new `qrCornerRadiusPx` describe (0/50/100,
+     linear-in-dim, monotonic-in-v) and `qrShadowParams` describe (all-zero
+     for "none", drop/neon shapes at the dim=100 reference unit, linear
+     scaling with `dim`). Existing `qrShadowFilterSpec`/`qrShadowBoxShadow`
+     tests updated for the new required `dim` param, plus one new case each
+     asserting the numbers scale with `dim`. New `qrShadowCss` describe
+     (identical output to `qrShadowBoxShadow` at the default unit; a custom
+     unit formatter is honored).
+   - `lib/printer-layout.test.ts` — `sanitizeQrStyle — corner radius`: full
+     matrix (default 24, valid pass-through incl. 0, clamp 150→100/-5→0,
+     rounding, non-numeric fallback, both legacy-enum migrations, unknown
+     legacy value → default, numeric-wins-over-legacy incl. the 0 edge
+     case). `normalizePrinterConfig` corner cases renamed/updated
+     (default/pass-through/legacy-enum-migration/v2-migration/round-trip).
+   - `lib/device-config.test.ts` — the existing qrCorner ETag case renamed
+     to `qrCornerRadius` with numeric values (24 vs. 0).
+
+**Gates:** `tsc --noEmit` 0 errors; `vitest run` 413/413 (was 393, +20 net
+new); `next build` clean; `eslint` — identical 20 pre-existing problems (15
+errors, 5 warnings; 0 new), diffed against the pre-branch tree.
+
+**Out of scope:** the firmware counterpart (device-side corner/shadow
+rendering to actually implement `qr_style.c` against the formulas
+documented here) — tracked separately, same split as the prior addenda.
+`qrCornerRadiusPx`/`qrShadowParams` are written specifically so a firmware
+dev can transcribe them directly (fixed-point-friendly: multiply by a
+percentage, no floating dependencies beyond that).
