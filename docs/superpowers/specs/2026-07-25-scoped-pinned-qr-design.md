@@ -106,18 +106,16 @@ For any mutation, the core:
    device change → that device).
 2. Computes the new effective URL per device; **affected** = devices whose
    effective URL differs (including → null).
-3. If the new effective URL is non-null for ≥1 affected device and the
-   change was a *set* (not a clear/`none`): charge
-   `affectedWithNewUrl × PIN_COST` in **one** `spendCredit` call
+3. **Paid ⇔ the change sets a URL.** A `PUT {url}` at any scope charges
+   `affected × PIN_COST` in **one** `spendCredit` call
    (`action: "pin_change"`; `lib/credits.ts` `spendCredit` already takes an
-   arbitrary `cost`). Insufficient balance rejects the whole operation —
-   no partial application. Clears and `none` are always free, as is a
-   same-URL no-op (0 affected → 0 credits → still applies mode metadata if
-   any).
-   - Precisely: **charged count = affected devices whose NEW effective URL is
-     non-null**. Devices that merely lose a pin (new effective = null) are
-     never charged, at any scope. This generalizes today's "change costs 1,
-     clear is free" to mixed outcomes of a single scoped change.
+   arbitrary `cost`) — for a URL set, every affected device's new effective
+   URL is that URL, so affected = charged. Insufficient balance rejects the
+   whole operation — no partial application. Everything else is free:
+   clears/DELETE, mode changes (`none` **and** `inherit`, even when
+   switching to `inherit` makes devices pick up a parent pin), same-URL
+   no-ops, and membership-driven inheritance. This generalizes today's
+   "change costs 1, clear is free".
 4. Writes the level's columns (`pinnedUrl`/`pinnedAt`/`pinMode`).
 5. Fans out one `deviceCommand` row (`type: "pin"`, payload
    `{ url: <new effective url> }`) + best-effort MQTT publish **per affected
