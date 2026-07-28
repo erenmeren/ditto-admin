@@ -80,8 +80,9 @@ Relations in `lib/db/relations.ts`.
   column splits `gap-6`. Type: h1 `font-display text-2xl font-bold`, h2 `text-lg
   font-medium`, description `text-sm text-muted-foreground`.
   **Full-bleed exception:** routes listed in `FULL_BLEED_ROUTES`
-  (`components/app-shell.tsx`) opt out of that container entirely — no padding,
-  no `max-w-7xl`, no `space-y-6` — and render edge-to-edge. `/tenant/branding` is
+  (`components/app-shell.tsx`) opt out of that container — no `max-w-7xl`, no
+  `space-y-6`, and only a small `px-4 pt-4` inset (bottom flush) instead of the
+  standard padding — so they render nearly edge-to-edge. `/tenant/branding` is
   the only one: it is an immersive canvas editor whose dark stage carries its own
   header and save chrome, so the gutters and the 1280px cap only shrank the
   workspace. Such a page owns its own insets and skips `PageHeader`. This is
