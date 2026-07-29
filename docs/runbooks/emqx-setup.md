@@ -45,6 +45,7 @@ curl -X POST -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
     {"topic":"d/${username}/cmd","permission":"allow","action":"subscribe"},
     {"topic":"d/${username}/ack","permission":"allow","action":"publish"},
     {"topic":"d/${username}/hb","permission":"allow","action":"publish"},
+    {"topic":"d/${username}/cfg/get","permission":"allow","action":"publish"},
     {"topic":"#","permission":"deny","action":"all"}
   ]}'   # → 204
 ```
@@ -56,13 +57,21 @@ curl -X POST -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
   deviceId, this one rule isolates every device — no per-device ACL needed.
 - The trailing `deny #` makes a topic that matches none of the allow rules
   denied, so a device can only ever reach `d/<its own username>/…`.
+- The `cfg/get` publish rule backs the config-request webhook (§4) — without
+  it the broker rejects the device's publish before the rule engine ever sees
+  it, and the message never reaches the cloud. This looks identical to the
+  "wrong action type" failure below (the channel just stays *never seen*), so
+  don't skip it when wiring up that rule.
 - Verify: `GET {EMQX_API_URL}/authorization/sources/built_in_database/rules/all`
-  shows the four rules. Confirmed applied on the live deployment (2026-07-16).
+  shows the five rules. The first three (cmd/ack/hb) were confirmed applied on
+  the live deployment (2026-07-16); `cfg/get` was added for the config-request
+  rule and must be (re-)applied — the `PUT`-style POST above replaces the
+  whole rule set, so re-running it is safe and idempotent.
 - **HIL validation:** run the spoof test in step 6 (valid credential, mismatched
   `clientid`) to confirm isolation genuinely keys on `username`, not `clientid`.
 
 ## 4. Data-Integration webhooks (broker → cloud)
-Create three HTTP-action webhooks, each sending header
+Create four HTTP-action webhooks, each sending header
 `x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`:
 - **ack:** rule `SELECT payload, username FROM "d/+/ack"` → POST `<APP_URL>/api/mqtt/ack`,
   body = `{...payload, "clientid": username}` (order matters — the broker-injected
@@ -76,14 +85,38 @@ Create three HTTP-action webhooks, each sending header
 - **presence:** events `client.connected`, `client.disconnected` → POST
   `<APP_URL>/api/mqtt/presence`, body includes `event` and the event's `username`
   as `clientid` (these events expose both `clientid` and `username`; use `username`).
+- **config-request:** rule `SELECT username as clientid FROM "d/+/cfg/get"` → POST
+  `<APP_URL>/api/mqtt/config-request`, with an extra header `x-device-id: ${username}`
+  (the route reads identity from this header first, falling back to a `clientid`
+  body field only if it's absent), body = `{"clientid":"${username}"}`. The
+  device publishes an empty `{}` to `d/{deviceId}/cfg/get` once per boot to ask
+  for its config; the cloud answers by publishing a freshly-presigned config back
+  on the device's existing `d/{deviceId}/cmd` topic (no new subscribe topic, no
+  ACL change needed on the cmd side — but see §3b for the new `cfg/get` **publish**
+  ACL rule this requires).
+
+  > **The action type for config-request MUST be "HTTP Server" / "Webhook" — the
+  > one that asks for a URL.** "Republish" asks for a Topic instead and forwards
+  > MQTT→MQTT; it never reaches the cloud. This exact mistake has silently killed
+  > a channel in production **twice** already — double-check the action type
+  > before saving the rule.
 
 **The identity field the routes read is still named `clientid` for route
 compatibility, but its VALUE must always be the authenticated `username`, never
 the connection `clientid`.** The whole device-ownership/credit-settlement model
-(ack scoping, heartbeat status, presence online/offline) trusts this field —
-`clientid` is client-supplied and unverified, so populating it with the raw
-`clientid` would let a device holding one valid credential spoof another
+(ack scoping, heartbeat status, presence online/offline, config lookup) trusts
+this field — `clientid` is client-supplied and unverified, so populating it with
+the raw `clientid` would let a device holding one valid credential spoof another
 device's identity by opening a connection with a different `clientid`.
+
+**Verify after creating the config-request rule:** power-cycle a device (or
+force a reconnect) and check the admin `/admin/health` MQTT transport card —
+"Config requests" must flip to *live*. If it stays *never seen* while ack/
+heartbeat/presence are live, check two things in order: the action type (must
+be HTTP Server, not Republish — see above) and the `cfg/get` publish ACL rule
+(§3b). (The card itself needs the `mqtt_webhook_ping` migration applied to
+read anything at all — until then it shows "Channel telemetry is unavailable"
+regardless of the rule's correctness.)
 
 ## 5. Set env vars
 Set the following required env vars in Vercel (prod) and `.env.local` (local),
