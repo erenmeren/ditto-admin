@@ -1542,6 +1542,31 @@ In `app_state.c`'s `poll_task`, in the branch that fires on a fresh MQTT connect
 
 Add `#include "esp_random.h"` to `app_state.c`.
 
+> **Corrected during execution — the jitter must not block, and the loop must not sleep past it.**
+> Shipped as firmware `8748f42`; a re-run must keep all three properties:
+>
+> 1. **No `vTaskDelay` in `poll_task`.** That loop also drains MQTT commands,
+>    consumes tap/swipe input and evaluates the boot gate; a 3-second inline sleep
+>    leaves a command delivered mid-reconnect undispatched and touch invisible —
+>    precisely when the cloud is most likely to have something queued. Instead arm
+>    a pending flag plus a due-time on fresh connect and publish from a
+>    non-blocking check at the top of the loop.
+> 2. **Clamp the loop's idle wait while a request is pending.** Arming and then
+>    calling `idle_wait_or_qr_expiry(MQTT_IDLE_MS)` defers the publish by up to
+>    ~30 s, because that wait returns early only for a swipe-up, a countdown
+>    expiry, or a notification raised on *command receipt* — never on connect.
+>    Clamp at the call site to `min(idle_interval, max(floor, due − now))` and
+>    leave the wait helper's contract alone. Verified worst case arm→publish:
+>    ~3,000 ms.
+> 3. **Clear `s_was_mqtt_up` when the network drops.** It is otherwise assigned
+>    only on the success path, so a Wi-Fi blip freezes it `true` and a
+>    same-iteration reconnect sends no `cfg/get` at all. Harmless while the HTTP
+>    config path still exists — load-bearing the moment Task B5 deletes it.
+>
+> Accepted: the due-time comparison is not wraparound-safe, so at ~49.7-day uptime
+> one harmless, idempotent `cfg/get` fires early.
+
+
 - [ ] **Step 4: Build**
 
 Run: `idf.py build`
