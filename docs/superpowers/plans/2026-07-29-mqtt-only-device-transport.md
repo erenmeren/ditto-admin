@@ -27,7 +27,11 @@ The spec at `docs/superpowers/specs/2026-07-29-mqtt-only-device-transport-design
 
 1. **Command type names.** Spec says `type: "config"` / `type: "ota"`. This plan reuses the existing `config-changed` / `firmware-update` types — zero enum churn, existing admin labels keep working, and the manual firmware-update button lands on the same publish seam.
 2. **Payload persistence.** The spec says both new command types are persisted as rows "like every other command", which reads as storing the payload. Rows are persisted; **payloads are not**. Republish regenerates instead of replaying, because presigned URLs expire in 300 s (config) / 600 s (OTA manifest).
-3. **Fragment reassembly is required on the device.** Measured config payload is **5,303 bytes** for the production org, while esp-mqtt's receive buffer is the IDF default **1,024 bytes** (no `CONFIG_MQTT_BUFFER_SIZE` override in `sdkconfig`). Inbound config therefore arrives as ~6 fragments and must be reassembled into PSRAM. Raising the esp-mqtt buffer instead is rejected: it lives in internal DRAM, where free space runs 120–170 KB and is already the system's tightest resource.
+3. **Fragment reassembly is required on the device.** Measured config payload is **5,303 bytes** for the production org, while the firmware sets its esp-mqtt receive buffer to **2,048 bytes** (`.buffer.size = 2048`, `components/mqtt_ditto/mqtt_client.c:86` — corrected during execution; an earlier draft of this plan wrongly cited the IDF default of 1,024, since `sdkconfig` carries no `CONFIG_MQTT_BUFFER_SIZE` override). Inbound config therefore arrives as ~3 fragments and must be reassembled into PSRAM. Raising the esp-mqtt buffer instead is rejected: it lives in internal DRAM, where free space runs 120–170 KB and is already the system's tightest resource.
+
+4. **The config push is version-gated, added after the whole-branch review.** Phase A is supposed to be additive, but publishing a 5.3 KB config to firmware that cannot reassemble it silently *broke* a working path: `cJSON_ParseWithLength` fails on each truncated fragment, the command is dropped, and `s_config_dirty` has no periodic poll, so a branding change would never land until reboot. `supportsConfigPush(firmwareVersion)` in `lib/mqtt-push.ts` therefore carries the config only for firmware **>= 0.18.0** and falls back to the old `payload: null` nudge otherwise — which the still-live HTTP config route answers. This also covers the mixed fleet during Phase B's rollout.
+
+   **Hard coupling:** Phase B must ship fragment reassembly in exactly release **0.18.0** (Task B5's version bump). Ship it under a different number and this gate points at the wrong release: capable devices keep getting the nudge, and after Phase C deletes the HTTP config route they can no longer answer it.
 
 ---
 
@@ -1673,9 +1677,11 @@ Online-ness now follows the broker, so replace the old `status == 200` gate with
 
 Also drop the "HTTP will redeliver" log in the MQTT drain (line ~485) — there is no HTTP to redeliver.
 
-- [ ] **Step 4: Bump the version**
+- [ ] **Step 4: Bump the version — must be exactly `0.18.0`**
 
 Set the firmware version to `0.18.0` wherever `appcfg_fw_version` reads it (check `main/Kconfig.projbuild` and the project `CMakeLists.txt`).
+
+**This number is load-bearing, not cosmetic.** The cloud's `supportsConfigPush` (`lib/mqtt-push.ts`) carries a config in the MQTT message only for firmware `>= 0.18.0` and sends the legacy nudge otherwise. If reassembly ships under any other number, capable devices keep getting a nudge whose HTTP answer Phase C then deletes. If the release number has to change, change the threshold in `lib/mqtt-push.ts` and its tests in the same commit.
 
 - [ ] **Step 5: Run tests and build**
 
