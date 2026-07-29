@@ -708,9 +708,11 @@ The `.returning(...)` on the device update (line 85) currently returns only `id`
       storeId: deviceTable.storeId,
       pinMode: deviceTable.pinMode,
       pinnedUrl: deviceTable.pinnedUrl,
-      firmwareVersion: deviceTable.firmwareVersion,
     });
 ```
+
+(The reconcile below reads the running version from the heartbeat payload
+(`hb.version`), not from the row, so `firmwareVersion` is not selected.)
 
 - [ ] **Step 2: Replace the republish loop**
 
@@ -764,7 +766,15 @@ After the republish loop and before the final `return`:
           and(
             eq(deviceCommand.deviceId, dev.id),
             eq(deviceCommand.type, "firmware-update"),
-            eq(deviceCommand.status, "pending"),
+            // "In flight" per this codebase's idiom (see lib/credit-holds.ts and
+            // the ack route) — the still-live HTTP poll marks commands delivered.
+            inArray(deviceCommand.status, ["pending", "delivered"]),
+            // A row outside the republish window has already been given up on
+            // by the loop above (nothing else ever expires a non-trigger
+            // command), so it must not block a fresh OTA nudge forever —
+            // only a row still young enough to be republished counts as
+            // "in flight".
+            gt(deviceCommand.createdAt, new Date(now.getTime() - REPUBLISH_UNTIL_MS)),
           ),
         )
         .limit(1);
@@ -790,7 +800,7 @@ Delete the old `return NextResponse.json({ ok: true, republished: stale.length }
 - [ ] **Step 4: Fix the imports**
 
 ```ts
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import { device as deviceTable, deviceCommand, firmwareRelease } from "@/lib/db/schema";
 import { mqttEnabled, verifyWebhookSecret, parseHeartbeatPayload, publishCommand } from "@/lib/mqtt";
 import { republishKindFor, publishConfigCommand, publishOtaCommand } from "@/lib/mqtt-push";
