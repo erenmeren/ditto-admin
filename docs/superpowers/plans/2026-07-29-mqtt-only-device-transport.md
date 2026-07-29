@@ -898,6 +898,98 @@ heartbeat."
 
 ---
 
+### Task A7b: One fleet-push seam for both publishing paths
+
+Added during execution. Task A7's discovery step found a **second** firmware-publishing path that planning missed: `publishFirmware` in `lib/actions/firmware.ts` (the `/admin/firmware` upload UI) inserts the `firmwareRelease` row exactly like the CLI script but never pushes to the fleet.
+
+This is not a correctness hole — the heartbeat OTA reconcile (Task A6) picks up any new release within one heartbeat interval (5 minutes, `HB_EVERY_MS` on the device), so online devices still converge. But an admin publishing through the UI reasonably expects the same "push now" behavior the CLI has, and leaving the claimed-device filter and the NULL-payload rule duplicated in two places contradicts the single-seam principle Task A7 exists to establish.
+
+**Files:**
+- Modify: `lib/mqtt-push.ts` (add the shared helper)
+- Modify: `lib/db/publish-firmware.ts` (call it instead of its own loop)
+- Modify: `lib/actions/firmware.ts` (call it after the release insert succeeds)
+
+**Interfaces:**
+- Consumes: `publishOtaCommand` (Task A2).
+- Produces: `async pushFirmwareToFleet(): Promise<{ published: number; queued: number }>` — selects every claimed device across all orgs, inserts a `pending` `firmware-update` row per device with a NULL payload, publishes the manifest, and returns how many were delivered now versus left queued for the heartbeat to retry.
+
+- [ ] **Step 1: Add the helper to `lib/mqtt-push.ts`**
+
+```ts
+/**
+ * Hand every claimed device the current firmware manifest. Both publishing
+ * paths — the CLI script and the /admin/firmware upload action — call this right
+ * after their firmwareRelease insert, so the claimed-device filter and the
+ * NULL-payload rule live in exactly one place. A device that is offline keeps a
+ * pending row and gets the manifest, freshly presigned, on its next heartbeat.
+ */
+export async function pushFirmwareToFleet(): Promise<{ published: number; queued: number }> {
+  const targets = await db
+    .select({ id: device.id, organizationId: device.organizationId })
+    .from(device)
+    .where(isNotNull(device.claimedAt));
+  let published = 0;
+  for (const t of targets) {
+    const commandId = genId("cmd");
+    await db.insert(deviceCommand).values({
+      id: commandId,
+      deviceId: t.id,
+      organizationId: t.organizationId,
+      type: "firmware-update",
+      status: "pending",
+    });
+    if (await publishOtaCommand(t.id, commandId)) published++;
+  }
+  return { published, queued: targets.length - published };
+}
+```
+
+Add `device`, `deviceCommand` to the schema import, `isNotNull` to the drizzle import, and the repo's id generator (`id` from `@/lib/ids`, aliased as `genId` to match this file's existing style if it already imports one).
+
+- [ ] **Step 2: Point the CLI script at it**
+
+Replace the per-device loop Task A7 added to `lib/db/publish-firmware.ts` with a single call, keeping a summary log:
+
+```ts
+  const { published, queued } = await pushFirmwareToFleet();
+  console.log(`  fleet: ${published} published, ${queued} queued (offline; hb will retry)`);
+```
+
+Delete the header comment A7 added about the second path being un-wired — it is wired now.
+
+- [ ] **Step 3: Point the admin action at it**
+
+In `lib/actions/firmware.ts`, call `pushFirmwareToFleet()` after the `firmwareRelease` insert succeeds. Wrap it so a push failure cannot fail the upload — the release row is the source of record and the heartbeat reconcile is the backstop:
+
+```ts
+  try {
+    await pushFirmwareToFleet();
+  } catch (err) {
+    console.error("fleet OTA push failed (devices reconcile on their next heartbeat)", err);
+  }
+```
+
+- [ ] **Step 4: Run the gate**
+
+Run: `npm test && npx tsc --noEmit`
+Expected: PASS, 453 tests
+
+Do NOT execute `lib/db/publish-firmware.ts` — it would publish to the real fleet.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add lib/mqtt-push.ts lib/db/publish-firmware.ts lib/actions/firmware.ts
+git commit -m "refactor(mqtt): one fleet-push seam for both firmware publish paths
+
+The /admin/firmware upload action created a release row but never pushed it, so
+it relied entirely on the heartbeat reconcile while the CLI pushed immediately.
+Extract the fan-out into pushFirmwareToFleet and call it from both, so the
+claimed-device filter and the NULL-payload rule have one home."
+```
+
+---
+
 ### Task A8: Admin MQTT health card
 
 **Files:**
