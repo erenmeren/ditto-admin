@@ -1186,82 +1186,154 @@ Set the git identity before the first commit — it is unset globally on this bo
 
 ---
 
-### Task B1: Extract config-body parsing from the HTTP fetch
+### Task B1: Command-envelope payload extractor (pure, host-tested)
 
-The JSON→`device_config_t` parse is the valuable half of `cloud_get_config`; only its transport is changing.
+**Rewritten during execution.** This task originally said "extract the JSON→`device_config_t` parse out of `cloud_get_config`". That premise was wrong: the parse is *already* a pure function — `cfg_parse_json(const char *json, device_config_t *cfg)` in `components/devcfg/cfg_parse.c`, declared in `components/devcfg/include/cfg_parse.h`, already host-tested by the harness. `cloud_get_config` is only HTTP plumbing plus a call to it. Nothing needs extracting.
+
+What is actually missing is one level up. An MQTT command arrives as an envelope — `{"commandId":…,"type":"config-changed","action":null,"payload":{…}}` — so both payload-carrying types need the same small step: pull the `payload` object out as JSON text and hand it to the parser that already exists. Config feeds `cfg_parse_json`; the OTA manifest feeds `ota_parse_manifest(const char *json, fw_manifest_t *out)`. Both take JSON text, so **one** helper serves both, and neither existing parser changes.
+
+This also covers a case the version gate makes real: a device on firmware >= 0.18.0 normally gets the config carried, but a `config-changed` with `payload: null` (the legacy nudge) must be detected and answered by re-requesting over `cfg/get` rather than treated as a parse failure.
 
 **Files:**
-- Modify: `components/cloud/cloud.c` (config section, around line 287-360)
-- Modify: `components/cloud/include/cloud.h`
-- Modify: `tools/cfg-harness/test_cfg.c` (and its Makefile's `SRCS` if a new source is needed)
+- Create: `components/devcfg/cmd_envelope.c`
+- Create: `components/devcfg/include/cmd_envelope.h`
+- Modify: `components/devcfg/CMakeLists.txt` (add the new source)
+- Modify: `tools/cfg-harness/test_cfg.c` (new test group) and `tools/cfg-harness/Makefile` (`SRCS`)
 
 **Interfaces:**
-- Produces: `bool cloud_config_parse_body(const char *json, int len, device_config_t *out);` — true when the body parsed into a valid config. `cloud_get_config` keeps working by calling it (Phase B5 deletes the HTTP wrapper).
+- Consumes: vendored cJSON (the harness already vendors it at `tools/cfg-harness/vendor/cJSON.c`, and the firmware gets it from IDF).
+- Produces: `bool cmd_payload_json(const char *envelope, char **out);` — on success `*out` is the payload object serialized with `cJSON_PrintUnformatted`, owned by the caller and freed with `cJSON_free`. Returns false (leaving `*out` untouched) when the envelope is malformed, is not an object, has no `payload`, or whose `payload` is not an object — which includes `payload: null`.
 
-- [ ] **Step 1: Read the current implementation**
+- [ ] **Step 1: Write the failing tests**
 
-Read `components/cloud/cloud.c` lines 287-362 and the cfg-harness test files. Identify exactly where the HTTP response body becomes a parsed `device_config_t`.
-
-- [ ] **Step 2: Write the failing harness test**
-
-Add to the cfg-harness a test that feeds a minimal config JSON straight to the new parser:
+Add to `tools/cfg-harness/test_cfg.c`, following the file's existing `test_*` style and registering it in `main` alongside the others:
 
 ```c
-static void test_parse_body_minimal(void)
-{
+static void test_cmd_envelope(void) {
+    char *p = NULL;
+
+    // Carried config: payload comes back as JSON text and feeds cfg_parse_json.
+    const char *env = "{\"commandId\":\"cmd_1\",\"type\":\"config-changed\",\"action\":null,"
+                      "\"payload\":{\"version\":\"v9\",\"brandColor\":\"#10A765\"}}";
+    assert(cmd_payload_json(env, &p));
+    assert(p && strstr(p, "\"version\"") && strstr(p, "v9"));
+    cJSON_free(p); p = NULL;
+
+    // The legacy nudge. MUST be false so the caller re-requests over cfg/get
+    // instead of reporting a parse failure.
+    assert(!cmd_payload_json("{\"commandId\":\"c\",\"type\":\"config-changed\",\"payload\":null}", &p));
+    assert(p == NULL);
+
+    // Missing payload, non-object payload, not an object, malformed.
+    assert(!cmd_payload_json("{\"commandId\":\"c\",\"type\":\"config-changed\"}", &p));
+    assert(!cmd_payload_json("{\"payload\":42}", &p));
+    assert(!cmd_payload_json("[1,2,3]", &p));
+    assert(!cmd_payload_json("not json", &p));
+    assert(!cmd_payload_json("", &p));
+
+    // Round trip into the REAL config parser — proves the extracted text is
+    // exactly what cfg_parse_json expects, not merely well-formed JSON.
+    const char *full = "{\"commandId\":\"cmd_2\",\"type\":\"config-changed\",\"payload\":"
+        "{\"version\":\"v3\",\"brandColor\":\"#10A765\",\"wordmark\":\"Acme\","
+        "\"config\":{\"clockTimezone\":\"UTC\",\"qrTimeoutSeconds\":15,\"screens\":{}},"
+        "\"device\":{\"brightness\":70,\"sleep\":{\"enabled\":false,\"timeoutSeconds\":300}},"
+        "\"pin\":null}}";
+    assert(cmd_payload_json(full, &p));
     static device_config_t cfg;
-    const char *json = "{\"version\":\"v1\",\"brandColor\":\"#10A765\",\"wordmark\":\"Acme\","
-                       "\"config\":{\"clockTimezone\":\"UTC\",\"qrTimeoutSeconds\":15,\"screens\":{}},"
-                       "\"device\":{\"brightness\":80,\"sleep\":{\"enabled\":false,\"timeoutSeconds\":300}},"
-                       "\"pin\":null}";
-    assert(cloud_config_parse_body(json, (int)strlen(json), &cfg));
-    assert(cfg.valid);
-    assert(strcmp(cfg.version, "v1") == 0);
-    assert(cfg.device.brightness == 80);
-    printf("ok parse_body_minimal\n");
+    assert(cfg_parse_json(p, &cfg));
+    assert(strcmp(cfg.version, "v3") == 0);
+    assert(cfg.device.brightness == 70);
+    cJSON_free(p); p = NULL;
+
+    // Same helper, OTA manifest payload — one extractor, both consumers.
+    const char *ota = "{\"commandId\":\"cmd_3\",\"type\":\"firmware-update\",\"payload\":"
+        "{\"version\":\"0.18.0\",\"url\":\"https://r2/x?sig=1\",\"sha256\":\"abc\",\"size\":1599264}}";
+    assert(cmd_payload_json(ota, &p));
+    fw_manifest_t m;
+    assert(ota_parse_manifest(p, &m));
+    assert(strcmp(m.version, "0.18.0") == 0);
+    assert(m.size == 1599264);
+    cJSON_free(p); p = NULL;
+
+    printf("test_cmd_envelope OK\n");
 }
 ```
 
-- [ ] **Step 3: Run it and watch it fail**
+- [ ] **Step 2: Run the harness and watch it fail**
 
 Run: `make -C tools/cfg-harness test`
-Expected: FAIL — implicit declaration of `cloud_config_parse_body`
+Expected: compile error — implicit declaration of `cmd_payload_json`.
 
-- [ ] **Step 4: Extract the function**
+- [ ] **Step 3: Implement it**
 
-Move the parse block out of `cloud_get_config` into:
+`components/devcfg/include/cmd_envelope.h`:
 
 ```c
-bool cloud_config_parse_body(const char *json, int len, device_config_t *out)
+#pragma once
+#include <stdbool.h>
+
+// Extract an MQTT command envelope's `payload` object as JSON text.
+//
+// A command arrives as {"commandId":…,"type":…,"action":…,"payload":{…}}. The
+// two payload-carrying types both hand their payload to a parser that already
+// takes JSON text — cfg_parse_json for config, ota_parse_manifest for the
+// firmware manifest — so this is the one step they share.
+//
+// On success *out is a cJSON_PrintUnformatted string owned by the caller, freed
+// with cJSON_free. Returns false and leaves *out untouched when the envelope is
+// malformed, is not an object, or has no OBJECT payload — which includes the
+// legacy `payload: null` nudge. A false return on a config command means "ask
+// again over cfg/get", not "the config was broken".
+bool cmd_payload_json(const char *envelope, char **out);
+```
+
+`components/devcfg/cmd_envelope.c`:
+
+```c
+#include "cmd_envelope.h"
+#include "cJSON.h"
+
+bool cmd_payload_json(const char *envelope, char **out)
 {
-    // ... the exact parse body that used to live inline in cloud_get_config,
-    // operating on (json, len) instead of the HTTP response buffer.
+    if (!envelope || !envelope[0] || !out) return false;
+    cJSON *root = cJSON_Parse(envelope);
+    if (!root) return false;
+    bool ok = false;
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    if (cJSON_IsObject(payload)) {
+        char *s = cJSON_PrintUnformatted(payload);
+        if (s) { *out = s; ok = true; }
+    }
+    cJSON_Delete(root);
+    return ok;
 }
 ```
 
-and have `cloud_get_config` call it on its response buffer. Declare it in `cloud.h` next to `cloud_get_config`.
+Add `cmd_envelope.c` to `components/devcfg/CMakeLists.txt`'s `SRCS`, and add it plus the include path to `tools/cfg-harness/Makefile`'s `SRCS` so the harness links it.
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 4: Run the harness**
 
 Run: `make -C tools/cfg-harness test`
-Expected: PASS, including the new case
+Expected: `test_cmd_envelope OK` plus the 11 pre-existing groups, `ALL TESTS PASSED`.
 
-- [ ] **Step 6: Build**
+- [ ] **Step 5: Build**
 
-Run: `idf.py build`
-Expected: success
+Run: `. $HOME/.espressif/v5.5/esp-idf/export.sh && idf.py build`
+Expected: success.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add components/cloud/
-git commit -m "refactor(cloud): split config JSON parsing from the HTTP fetch
+git add components/devcfg/ tools/cfg-harness/
+git commit -m "feat(devcfg): extract a command envelope's payload as JSON text
 
-Only the transport is changing; the parse is the valuable part. Pulling it out
-as cloud_config_parse_body lets an MQTT-delivered config reuse it verbatim."
+An MQTT command wraps its payload in an envelope, and both payload-carrying
+types already have a parser that takes JSON text — cfg_parse_json and
+ota_parse_manifest. One helper serves both; neither parser changes. A payload
+that is absent or null (the legacy nudge) returns false, which the caller reads
+as \"ask again over cfg/get\" rather than as a broken config."
 ```
 
----
 
 ### Task B2: Reassemble large inbound MQTT payloads into PSRAM
 
@@ -1349,62 +1421,34 @@ bool mqtt_parse_pending_config(device_config_t *out)
 {
     if (!s_stage_ready || !s_stage || !s_stage_mux) return false;
     xSemaphoreTake(s_stage_mux, portMAX_DELAY);
-    // The payload is the command envelope; the config lives under "payload".
-    bool ok = cloud_config_parse_command(s_stage, s_stage_len, out);
+    // The staged bytes are the command envelope; Task B1's extractor pulls the
+    // config out of it and cfg_parse_json (unchanged) does the real parse. A
+    // false return here includes the legacy `payload: null` nudge, which the
+    // caller answers by re-requesting over cfg/get.
+    char *payload = NULL;
+    bool ok = false;
+    if (cmd_payload_json(s_stage, &payload)) {
+        ok = cfg_parse_json(payload, out);
+        cJSON_free(payload);
+    }
     s_stage_ready = false;
     xSemaphoreGive(s_stage_mux);
     return ok;
 }
 ```
 
-- [ ] **Step 4: Add the envelope unwrapper to the cloud component**
+- [ ] **Step 4: Save the applied config to the NVS cache**
 
-The MQTT message is `{commandId, type, action, payload: <config>}`, so add next to `cloud_config_parse_body` in `cloud.c` (declared in `cloud.h`):
+`cloud_get_config` calls a static `cfg_save_nvs(body)` (`components/cloud/cloud.c:291`) so the next boot can seed from cache and 304. An MQTT-delivered config must cache the same thing — the **payload** JSON, not the envelope, or the boot path would feed `cfg_parse_json` an envelope it cannot read.
 
-```c
-// Unwrap a command envelope and parse its `payload` as a device config.
-bool cloud_config_parse_command(const char *json, int len, device_config_t *out)
-{
-    cJSON *root = cJSON_ParseWithLength(json, len);
-    if (!root) return false;
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    bool ok = false;
-    if (cJSON_IsObject(payload)) {
-        char *body = cJSON_PrintUnformatted(payload);
-        if (body) {
-            ok = cloud_config_parse_body(body, (int)strlen(body), out);
-            cJSON_free(body);
-        }
-    }
-    cJSON_Delete(root);
-    return ok;
-}
-```
+Expose that cache write (rename to `cloud_config_cache_write(const char *json)`, declared in `cloud.h`) and call it from the MQTT apply path with the extracted payload, right after `cfg_parse_json` succeeds.
 
-- [ ] **Step 5: Add a harness test for the envelope**
-
-```c
-static void test_parse_command_envelope(void)
-{
-    static device_config_t cfg;
-    const char *msg = "{\"commandId\":\"cmd_1\",\"type\":\"config-changed\",\"action\":null,"
-                      "\"payload\":{\"version\":\"v2\",\"brandColor\":\"#10A765\",\"wordmark\":\"Acme\","
-                      "\"config\":{\"clockTimezone\":\"UTC\",\"qrTimeoutSeconds\":15,\"screens\":{}},"
-                      "\"device\":{\"brightness\":70,\"sleep\":{\"enabled\":false,\"timeoutSeconds\":300}},"
-                      "\"pin\":null}}";
-    assert(cloud_config_parse_command(msg, (int)strlen(msg), &cfg));
-    assert(cfg.valid);
-    assert(strcmp(cfg.version, "v2") == 0);
-    printf("ok parse_command_envelope\n");
-}
-```
-
-- [ ] **Step 6: Run tests and build**
+- [ ] **Step 5: Run tests and build**
 
 Run: `make -C tools/cfg-harness test && idf.py build`
 Expected: both PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add components/mqtt_ditto/ components/cloud/
@@ -1497,7 +1541,7 @@ jitter keeps a whole store powering up at once from stampeding the cloud."
 - Modify: `main/app_state.c`
 
 **Interfaces:**
-- Consumes: `mqtt_config_pending`, `mqtt_parse_pending_config` (B2); `cloud_config_parse_command` (B2).
+- Consumes: `mqtt_config_pending`, `mqtt_parse_pending_config`, `mqtt_parse_pending_ota` (B2); `cmd_payload_json` (B1); the unchanged `cfg_parse_json` and `ota_parse_manifest`.
 - Produces: `void ota_start_with_manifest(const fw_manifest_t *m);` replacing `ota_check_and_update`'s internal fetch.
 
 - [ ] **Step 1: Read the OTA component**
@@ -1520,22 +1564,7 @@ Declare it in `ota.h`.
 
 - [ ] **Step 3: Parse the manifest out of the command envelope**
 
-`fw_manifest_t` is small and fixed, so it fits in a queued command — but `dev_command_t` has no field for it. Rather than widen the struct, parse the manifest from the staged JSON the same way config is. Add to `components/devcfg/ota_manifest.c` (declared in `ota_manifest.h`):
-
-```c
-// Unwrap a command envelope and parse its `payload` as an OTA manifest.
-bool ota_manifest_parse_command(const char *json, int len, fw_manifest_t *out)
-{
-    cJSON *root = cJSON_ParseWithLength(json, len);
-    if (!root) return false;
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    bool ok = cJSON_IsObject(payload) && ota_manifest_parse(payload, out);
-    cJSON_Delete(root);
-    return ok;
-}
-```
-
-Match the existing `ota_manifest_parse` signature found in step 1; if it takes a JSON string rather than a `cJSON *`, adapt accordingly.
+No new parser is needed. Task B1's `cmd_payload_json` pulls the payload out and the existing `ota_parse_manifest(const char *json, fw_manifest_t *out)` (`components/devcfg/ota_manifest.c`, already host-tested) reads it unchanged — the same two-step the config path uses.
 
 - [ ] **Step 4: Add a staged-manifest accessor to mqtt_ditto**
 
@@ -1546,7 +1575,12 @@ bool mqtt_parse_pending_ota(fw_manifest_t *out)
 {
     if (!s_ota_ready || !s_stage || !s_stage_mux) return false;
     xSemaphoreTake(s_stage_mux, portMAX_DELAY);
-    bool ok = ota_manifest_parse_command(s_stage, s_stage_len, out);
+    char *payload = NULL;
+    bool ok = false;
+    if (cmd_payload_json(s_stage, &payload)) {
+        ok = ota_parse_manifest(payload, out);
+        cJSON_free(payload);
+    }
     s_ota_ready = false;
     xSemaphoreGive(s_stage_mux);
     return ok;
@@ -1647,7 +1681,7 @@ the heartbeat and pushes when the device is behind."
 
 Remove from `cloud.c` + `cloud.h`: `cloud_get_commands`, `cloud_get_commands_to`, `cloud_ack_command`, `cloud_get_config`, `cloud_get_firmware`, and `cloud_post_document` (already dead — ingest was removed in the trigger-only pivot).
 
-Keep: `cloud_claim_poll`, `cloud_fetch_asset`, `cloud_config_load_cached`, `cloud_config_parse_body`, `cloud_config_parse_command`, `cloud_last_asset_status`, `cloud_last_config_status`, `cloud_last_parse_ok`, and the handler setters/getters.
+Keep: `cloud_claim_poll`, `cloud_fetch_asset`, `cloud_config_load_cached`, `cloud_config_cache_write` (B2 step 4), `cloud_last_asset_status`, `cloud_last_config_status`, `cloud_last_parse_ok`, and the handler setters/getters. The parsers themselves live in devcfg (`cfg_parse_json`, `ota_parse_manifest`, `cmd_payload_json`) and are untouched by this deletion.
 
 - [ ] **Step 2: Delete `commands_handle_body`**
 
@@ -2039,7 +2073,7 @@ Report: deployment URL, the 404 on the deleted route, device online + firmware v
 | Delete 4 routes + `lib/device-auth.ts` | C1 |
 | Claim stays HTTPS | C1 step 1 (explicitly asserted) |
 | Firmware deletions incl. dead `cloud_post_document` | B5 |
-| `cloud_config_parse_body` extraction | B1 |
+| Command-envelope payload extraction (B1, rewritten: the config parse was already extracted as `cfg_parse_json`, so the real gap was the envelope) | B1 |
 | `ota_start_with_manifest` | B4 |
 | Trigger hard-fail on publish failure | C2 |
 | `config`/`ota` are desired-state, may stay pending | A4, A6, A7 (rows inserted pending; only trigger fails closed) |
