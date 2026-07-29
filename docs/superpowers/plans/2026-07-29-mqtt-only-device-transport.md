@@ -17,7 +17,7 @@
 - **Every EMQX action must be type "HTTP Server" / "Webhook"** (it asks for a URL). "Republish" (asks for a Topic) forwards MQTT→MQTT and silently never reaches the cloud. This has broken production twice.
 - **Money never moves for `billing: "included"`.** Credit settle/release stays behind `lib/trigger-ack.ts`.
 - **Tests live in `lib/*.test.ts` as pure-function tests** — there are no route integration tests in this repo (45 test files, 438 tests). Put decision logic in pure helpers in `lib/` and keep routes thin, so the logic is testable in the established style.
-- **Gates.** Cloud: `npm test`, `npx tsc --noEmit`, `npm run build`. Firmware: `make -C tools/cfg-harness test` (the harness has no root-level target — corrected during execution; the plan originally said `make test`) and `idf.py build`, after `. $HOME/.espressif/v5.5/esp-idf/export.sh`. Verified green at baseline on 2026-07-29: 11 harness groups pass, build succeeds with 21% of the app partition free.
+- **Gates.** Cloud: `npm test`, `npx tsc --noEmit`, `npm run build`. Firmware: `make -C tools/cfg-harness test` (the harness has no root-level target — corrected during execution; the plan originally said `make test`) and `idf.py build`, after `. $HOME/.espressif/v5.5/esp-idf/export.sh`. Verified green at baseline on 2026-07-29: **33** harness groups pass (an earlier note in this plan said 11 — that was the visible tail of the output, not the count), build succeeds with 21% of the app partition free.
 - **Command types are NOT widened.** Reuse the existing `config-changed` and `firmware-update` values in `lib/db/schema.ts:379`. They already have admin labels (`app/(tenant)/tenant/stores/[storeId]/[deviceId]/page.tsx:33-34`) and the manual "Update firmware" button (`components/devices/command-bar.tsx:11`) converges on the same seam. No migration for this.
 - **A `config-changed` / `firmware-update` row stores `payload: null`.** The payload is generated at publish time and never persisted: a stored config replayed 60 s later would carry expired 300 s presigned R2 URLs.
 
@@ -1241,7 +1241,9 @@ static void test_cmd_envelope(void) {
     assert(cmd_payload_json(full, &p));
     static device_config_t cfg;
     assert(cfg_parse_json(p, &cfg));
-    assert(strcmp(cfg.version, "v3") == 0);
+    // NOTE: device_config_t has no `version` field — the payload's "version"
+    // lands in `etag[48]`, which the device sends back as If-None-Match.
+    assert(strcmp(cfg.etag, "v3") == 0);
     assert(cfg.device.brightness == 70);
     cJSON_free(p); p = NULL;
 
@@ -1314,7 +1316,7 @@ Add `cmd_envelope.c` to `components/devcfg/CMakeLists.txt`'s `SRCS`, and add it 
 - [ ] **Step 4: Run the harness**
 
 Run: `make -C tools/cfg-harness test`
-Expected: `test_cmd_envelope OK` plus the 11 pre-existing groups, `ALL TESTS PASSED`.
+Expected: `test_cmd_envelope OK` plus the 33 pre-existing groups (34 total), `ALL TESTS PASSED`.
 
 - [ ] **Step 5: Build**
 
