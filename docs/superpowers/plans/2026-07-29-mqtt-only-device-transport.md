@@ -1439,6 +1439,31 @@ bool mqtt_parse_pending_config(device_config_t *out)
 }
 ```
 
+> **Corrected during execution — two invariants the snippets above get wrong.**
+> The code as written above has a torn-read race and a coverage gap; the shipped
+> version (firmware `ab6d117`) fixes both, and a re-run of this task must keep them:
+>
+> 1. **The ready flag must be cleared under the mutex, in the same critical
+>    section as the first byte of a new message** (`current_data_offset == 0`),
+>    and the reader must re-check it **after** `xSemaphoreTake`, not only before.
+>    Otherwise: message A completes and sets the flag, the reader hasn't drained
+>    it, message B overwrites from offset 0 while `s_stage_len` still holds A's
+>    length, and the reader — whose pre-lock check is a TOCTOU — parses B's head
+>    glued to A's tail. Two edits to the same org produce structurally identical
+>    configs, so a splice can land on a value boundary and yield syntactically
+>    valid but semantically wrong JSON that is applied, rendered, and persisted
+>    to NVS, surviving reboot with nothing logged.
+> 2. **There is no separate single-fragment fast path.** Every message assembles
+>    through the staging slot, a one-fragment message being simply a complete
+>    message written at offset 0. Flagging only the multi-fragment path would
+>    silently ignore the carried config of any tenant whose layout has no
+>    uploaded images — no presigned URLs means no bulk, and that config can land
+>    under the 2,048-byte fragment size.
+>
+> Known and accepted: the reader holds the mutex across parse + NVS write, so a
+> slow flash write briefly blocks the esp-mqtt task. Watch for a keepalive-driven
+> disconnect during the Task B6 HIL; if it appears, narrow the lock to the copy.
+
 - [ ] **Step 4: Save the applied config to the NVS cache**
 
 `cloud_get_config` calls a static `cfg_save_nvs(body)` (`components/cloud/cloud.c:291`) so the next boot can seed from cache and 304. An MQTT-delivered config must cache the same thing — the **payload** JSON, not the envelope, or the boot path would feed `cfg_parse_json` an envelope it cannot read.
