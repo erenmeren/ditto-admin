@@ -505,7 +505,7 @@ git commit -m "feat(mqtt): parse the cfg/get webhook payload"
 // GET /api/device/config: the device asks over MQTT and never over HTTP.
 
 import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { device as deviceTable, deviceCommand } from "@/lib/db/schema";
 import { mqttEnabled, verifyWebhookSecret, parseConfigRequestPayload } from "@/lib/mqtt";
@@ -546,7 +546,6 @@ export async function POST(req: Request) {
       storeId: deviceTable.storeId,
       pinMode: deviceTable.pinMode,
       pinnedUrl: deviceTable.pinnedUrl,
-      status: deviceTable.status,
     })
     .from(deviceTable)
     .where(eq(deviceTable.id, deviceId))
@@ -557,9 +556,14 @@ export async function POST(req: Request) {
 
   // A request also proves liveness — the device just published to the broker.
   const now = new Date();
+  // Atomic in-DB decision: never resurrect a paused device, even under
+  // concurrent writes (no stale JS-side status read driving this write).
   await db
     .update(deviceTable)
-    .set({ lastSeenAt: now, ...(dev.status === "paused" ? {} : { status: "online" as const }) })
+    .set({
+      lastSeenAt: now,
+      status: sql`CASE WHEN ${deviceTable.status} = 'paused' THEN ${deviceTable.status} ELSE 'online' END`,
+    })
     .where(eq(deviceTable.id, dev.id));
 
   // Row first (payload NULL — never store the presigned config), then publish.
