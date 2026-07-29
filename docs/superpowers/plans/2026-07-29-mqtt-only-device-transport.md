@@ -17,7 +17,7 @@
 - **Every EMQX action must be type "HTTP Server" / "Webhook"** (it asks for a URL). "Republish" (asks for a Topic) forwards MQTT→MQTT and silently never reaches the cloud. This has broken production twice.
 - **Money never moves for `billing: "included"`.** Credit settle/release stays behind `lib/trigger-ack.ts`.
 - **Tests live in `lib/*.test.ts` as pure-function tests** — there are no route integration tests in this repo (45 test files, 438 tests). Put decision logic in pure helpers in `lib/` and keep routes thin, so the logic is testable in the established style.
-- **Gates.** Cloud: `npm test`, `npx tsc --noEmit`, `npm run build`. Firmware: `make test`, `idf.py build`.
+- **Gates.** Cloud: `npm test`, `npx tsc --noEmit`, `npm run build`. Firmware: `make -C tools/cfg-harness test` (the harness has no root-level target — corrected during execution; the plan originally said `make test`) and `idf.py build`, after `. $HOME/.espressif/v5.5/esp-idf/export.sh`. Verified green at baseline on 2026-07-29: 11 harness groups pass, build succeeds with 21% of the app partition free.
 - **Command types are NOT widened.** Reuse the existing `config-changed` and `firmware-update` values in `lib/db/schema.ts:379`. They already have admin labels (`app/(tenant)/tenant/stores/[storeId]/[deviceId]/page.tsx:33-34`) and the manual "Update firmware" button (`components/devices/command-bar.tsx:11`) converges on the same seam. No migration for this.
 - **A `config-changed` / `firmware-update` row stores `payload: null`.** The payload is generated at publish time and never persisted: a stored config replayed 60 s later would carry expired 300 s presigned R2 URLs.
 
@@ -1193,7 +1193,7 @@ The JSON→`device_config_t` parse is the valuable half of `cloud_get_config`; o
 **Files:**
 - Modify: `components/cloud/cloud.c` (config section, around line 287-360)
 - Modify: `components/cloud/include/cloud.h`
-- Modify: the cfg-harness test target (find it via `make test`)
+- Modify: `tools/cfg-harness/test_cfg.c` (and its Makefile's `SRCS` if a new source is needed)
 
 **Interfaces:**
 - Produces: `bool cloud_config_parse_body(const char *json, int len, device_config_t *out);` — true when the body parsed into a valid config. `cloud_get_config` keeps working by calling it (Phase B5 deletes the HTTP wrapper).
@@ -1224,7 +1224,7 @@ static void test_parse_body_minimal(void)
 
 - [ ] **Step 3: Run it and watch it fail**
 
-Run: `make test`
+Run: `make -C tools/cfg-harness test`
 Expected: FAIL — implicit declaration of `cloud_config_parse_body`
 
 - [ ] **Step 4: Extract the function**
@@ -1243,7 +1243,7 @@ and have `cloud_get_config` call it on its response buffer. Declare it in `cloud
 
 - [ ] **Step 5: Run the tests**
 
-Run: `make test`
+Run: `make -C tools/cfg-harness test`
 Expected: PASS, including the new case
 
 - [ ] **Step 6: Build**
@@ -1401,7 +1401,7 @@ static void test_parse_command_envelope(void)
 
 - [ ] **Step 6: Run tests and build**
 
-Run: `make test && idf.py build`
+Run: `make -C tools/cfg-harness test && idf.py build`
 Expected: both PASS
 
 - [ ] **Step 7: Commit**
@@ -1685,7 +1685,7 @@ Set the firmware version to `0.18.0` wherever `appcfg_fw_version` reads it (chec
 
 - [ ] **Step 5: Run tests and build**
 
-Run: `make test && idf.py build`
+Run: `make -C tools/cfg-harness test && idf.py build`
 Expected: both PASS, with no warnings about unused statics
 
 - [ ] **Step 6: Commit**
