@@ -1113,9 +1113,19 @@ channel card — "Config requests" must flip to *live*. If it stays *never seen*
 while heartbeats are live, the action type is wrong.
 ````
 
-- [ ] **Step 3: Create the rule in the EMQX console**
+- [ ] **Step 3: Grant the `cfg/get` publish ACL (operator step — discovered during execution)**
 
-This is a manual console step. Follow the section just written.
+Planning missed this and it is fail-closed. The EMQX authorization rule set (runbook §3b) granted only `d/${username}/cmd` (subscribe), `ack` (publish) and `hb` (publish), followed by a catch-all `deny #`. Without an allow rule for `cfg/get`, **the broker rejects the device's config request before the webhook rule can ever fire** — and the symptom is indistinguishable from the Republish-vs-HTTP-Server mistake, so an operator would debug the wrong thing. The runbook's §3b curl now includes:
+
+```json
+{"topic":"d/${username}/cfg/get","permission":"allow","action":"publish"}
+```
+
+placed **before** the catch-all deny (EMQX evaluates the array in order and stops at first match, so an allow after the deny is dead). Re-run §3b's curl against the live deployment.
+
+- [ ] **Step 4: Create the webhook rule in the EMQX console**
+
+A manual console step; follow the section just written. **Do this after Task A10's deploy**, not before: the rule's target URL must exist, and EMQX deactivates a rule whose endpoint keeps failing. Nothing publishes to `cfg/get` until the firmware of Phase B ships, so there is no rush and no window of lost messages either way.
 
 - [ ] **Step 4: Commit**
 
@@ -1143,11 +1153,21 @@ Run: `vercel --prod --yes`
 
 If the project link is missing: `vercel link --yes --scope eren-altans-projects --project ditto-admin` first.
 
-- [ ] **Step 4: Verify the additive phase changed nothing for the live device**
+- [ ] **Step 4: Do Task A9's two operator steps, in this order**
 
-The device is still on 0.17.1 and still uses HTTP. Confirm it stays online and that the admin MQTT card shows ack/heartbeat/presence live. "Config requests" will read *never seen* until Phase B ships — that is expected here.
+Both need EMQX console/API access and cannot be automated from this repo:
+1. Re-run the runbook §3b authorization curl so the `cfg/get` publish ACL exists.
+2. Create the config-request webhook rule per runbook §4 — action type **HTTP Server**, never Republish.
 
-- [ ] **Step 5: Confirm and report**
+The rule is created *after* the deploy so its target URL already resolves.
+
+- [ ] **Step 5: Verify the additive phase changed nothing for the live device**
+
+The device is still on 0.17.1 and still uses HTTP. Confirm it stays online and that the admin MQTT card shows ack/heartbeat/presence live. "Config requests" will read *never seen* until Phase B ships — that is expected here, because no firmware publishes to `cfg/get` yet.
+
+Also load `/admin/health` and confirm the MQTT transport card renders real rows rather than "Channel telemetry is unavailable" — that string means the migration did not apply.
+
+- [ ] **Step 6: Confirm and report**
 
 Report the deployment URL and the four channel states. **Do not start Phase C.**
 
