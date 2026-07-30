@@ -2324,3 +2324,101 @@ Two spec test items are covered differently than written and this is deliberate:
 **Placeholder scan:** No TBD/TODO. Three tasks legitimately begin with a read step because the target code was not read during planning — A7 step 1 (manual-command server action), A8 step 1 (host admin page), B4 step 1 (`ota.c` internals) and B1 step 1 (cfg-harness layout). Each names exactly what to find and the grep or command to find it.
 
 **Type consistency:** `PushTarget` (A2) is satisfied by the selects in A4, A5 and A6 — all five fields present in each. `publishConfigCommand(dev, commandId)` takes the target object; `publishOtaCommand(deviceId, commandId)` takes the id, since it needs no pin context. `republishKindFor` returns exactly the three literals the A6 switch handles. `MqttChannel` values in A1 match the `recordWebhookPing` call sites in A1 step 7 and A4. On the device, `mqtt_parse_pending_config(device_config_t *)` / `mqtt_parse_pending_ota(fw_manifest_t *)` mirror each other and are consumed in B4 step 6.
+
+---
+
+# PHASE D — Make the device self-repairing (follow-up)
+
+Added 2026-07-30, after the migration shipped. The final whole-branch review named the fleet's largest remaining fragility, and it is one problem with two halves. With no HTTP fallback left, there is exactly one failure class the cloud cannot fix on its own, and one operational move it cannot survive:
+
+- **A swallowed provisioning failure strands a device permanently.** `claimDevice` and `autoClaimDevice` call `provisionDeviceMqtt` fail-open (a broker hiccup must never fail a claim). If that call fails, the device holds a valid device key the broker will reject. The cloud cannot re-provision it, because the raw key is delivered exactly once and only its hash is stored. Recovery today is a full re-claim.
+- **A broker move cannot reach the fleet.** Host and port are refreshed only by a config push — which arrives over the broker being replaced. Migrate EMQX while the old deployment is unreachable and every device needs USB recovery.
+
+Both close with the same insight: `GET /api/device/identity` is the one place the cloud sees a raw device key again, and it is the one channel that does not depend on the broker.
+
+---
+
+### Task D1: The identity endpoint repairs the broker credential (cloud)
+
+**Files:**
+- Modify: `app/api/device/identity/route.ts`
+
+**Interfaces:**
+- Consumes: `authenticateDevice` (`lib/device-auth.ts`), `provisionDeviceMqtt` and `buildMqttConfigBlock` (`lib/mqtt.ts`).
+- Produces: no signature change. The response body stays `{ deviceId, mqtt }`.
+
+**Why this is safe:** the caller has already proven possession of the raw key — it hashed to a stored device row. Writing that same key as that same device's broker credential grants nothing the caller did not already have. `provisionDeviceMqtt` is idempotent (POST, and a 409 becomes a PUT), so calling it on every identity request is cheap and self-correcting.
+
+- [ ] **Step 1: Extract the raw key and re-provision**
+
+`authenticateDevice` parses `Authorization: Bearer <key>` internally and returns only the row, so the route needs to read the header itself for the raw value. Do that after authentication succeeds — never before, so an unauthenticated request can never reach the provisioning call.
+
+Then call `provisionDeviceMqtt(device.id, rawKey)` **fail-open**: log a failure and still answer with the identity. The device needs its id and broker coordinates regardless, and if the credential is still wrong the firmware's retry (Task D2) brings it back here.
+
+Add a comment explaining that this is the repair path — that this endpoint exists partly *because* it is the only place the cloud can rebuild a credential it can otherwise never recover.
+
+- [ ] **Step 2: Correct the route's header comment**
+
+It currently says "Called once per device lifetime — and again only if NVS is wiped — never on a timer." After Task D2 that is wrong: the device also calls it after repeated MQTT connect failures. Say so, and say why (it is the credential-repair and broker-rediscovery path), while keeping the "never on a timer" guarantee, which stays true.
+
+- [ ] **Step 3: Gate**
+
+Run: `npm test && npx tsc --noEmit && npm run build`
+Expected: PASS, 465 tests.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/api/device/identity/route.ts
+git commit -m "feat(device): identity endpoint repairs the broker credential
+
+Claim provisions the MQTT credential fail-open, so a broker hiccup there leaves
+the device holding a key the broker rejects — and the cloud cannot re-provision
+it, because the raw key is delivered once and only its hash is stored. This
+endpoint is the one place the cloud sees a raw key again, so it rebuilds the
+credential on every call. Idempotent, and still fail-open: the device gets its
+identity either way."
+```
+
+---
+
+### Task D2: The device re-fetches identity when it cannot connect (firmware)
+
+**Repo:** `/home/meren/projects/ditto-firmware`
+
+**Files:**
+- Modify: `main/app_state.c`
+
+**Interfaces:**
+- Consumes: `cloud_fetch_identity()` (`components/cloud/`), `mqtt_is_connected()`, `mqtt_start()`.
+- Produces: no new exports.
+
+**The shape.** `poll_task`'s MQTT-down branch already runs on a 2 s→60 s backoff and already calls `cloud_fetch_identity()` when there is no stored device id. Extend it: count consecutive passes where MQTT is down, and once that count crosses a threshold, re-fetch identity even though an id is already stored — then `mqtt_start()` against the refreshed values. Reset the counter on a successful connect.
+
+That single change covers both halves. A rejected credential gets rebuilt by Task D1 on the same call, and a moved broker is rediscovered because the response carries fresh host and port.
+
+**Pacing matters.** `cloud_fetch_identity()` is a synchronous HTTPS call with a 10 s timeout, on the task that also drains commands and consumes touch input. Do not call it on every failed pass. Gate it on both the failure count and a minimum interval, so a genuinely-down broker costs one identity attempt every few minutes rather than one per pass.
+
+- [ ] **Step 1: Add the counter and the gated re-fetch**
+
+Reset on connect. Trigger on threshold. Rate-limit by elapsed time as well as count.
+
+- [ ] **Step 2: Gates**
+
+Run: `make -C tools/cfg-harness test && idf.py build`
+Expected: 34 groups pass; build clean.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add main/app_state.c
+git commit -m "feat(device): re-fetch identity after repeated MQTT connect failures
+
+Two failures the device could not previously escape: a broker credential that
+was never provisioned (the cloud cannot rebuild it from a stored hash), and a
+broker that moved (host and port only refresh via a config push that arrives
+over the broker being replaced). Re-fetching identity fixes both, since the
+cloud repairs the credential on that call and the response carries fresh
+coordinates. Paced by both a failure count and a minimum interval, because the
+fetch is synchronous on the task that also drains commands."
+```
