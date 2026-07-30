@@ -1,7 +1,10 @@
 # EMQX Cloud Serverless — Setup Runbook
 
-One-time setup to activate the MQTT device transport. Until these steps are
-done and the env vars are set, the cloud runs in HTTP-polling mode (no-op).
+One-time setup to activate the MQTT device transport. MQTT is the only device
+transport — there is no fallback. Until these steps are done and the env vars
+are set (`mqttEnabled()` false), no device can be reached at all: commands
+cannot be published, config cannot be delivered, and the trigger API fails
+closed with `503 transport_unavailable`.
 
 ## 1. Create the deployment
 - EMQX Cloud → Serverless → region **eu-central-1 (Frankfurt)**.
@@ -139,8 +142,13 @@ then redeploy:
 - `MQTT_BROKER_PORT` — TLS listener port (`8883`)
 
 Validate with the desk device (b580): trigger via the public API and confirm
-the QR renders in < 1 s, then kill the broker connection and confirm HTTP
-polling resumes.
+the QR renders in < 1 s, then kill the broker connection and confirm the
+device goes offline in the admin and no traffic appears on any device HTTP
+route (there are none left to appear on) — there is no HTTP-polling
+fallback, only esp-mqtt's own retry-with-backoff against the broker. The
+device stays on its cached screen while disconnected; once the broker is
+reachable again, confirm it reconnects and re-requests its config on its own
+via `cfg/get`.
 
 ## 6. Spoof test (identity keyed on `username`, not `clientid`)
 Connect to the broker with device A's valid credential (`username=<deviceA
