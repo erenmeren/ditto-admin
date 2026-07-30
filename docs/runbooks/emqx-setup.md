@@ -85,10 +85,18 @@ Create four HTTP-action webhooks, each sending header
 - **presence:** events `client.connected`, `client.disconnected` → POST
   `<APP_URL>/api/mqtt/presence`, body includes `event` and the event's `username`
   as `clientid` (these events expose both `clientid` and `username`; use `username`).
-- **config-request:** rule `SELECT username as clientid FROM "d/+/cfg/get"` → POST
+- **config-request:** rule `SELECT username FROM "d/+/cfg/get"` → POST
   `<APP_URL>/api/mqtt/config-request`, with an extra header `x-device-id: ${username}`
   (the route reads identity from this header first, falling back to a `clientid`
-  body field only if it's absent), body = `{"clientid":"${username}"}`. The
+  body field only if it's absent), body = `{"clientid":"${username}"}`.
+  **Select `username` plainly — do NOT write `SELECT username as clientid` here.**
+  An action's `${...}` placeholders resolve against the columns the rule's SELECT
+  actually produces, so aliasing to `clientid` while the header and body reference
+  `${username}` leaves both empty: the route then sees no device id, answers 400,
+  and the channel stays *never seen* with nothing in the ping table — identical to
+  the Republish symptom, and how this rule silently failed on first setup
+  (2026-07-30). The working `ack` rule above is the pattern to copy: select the
+  field, then reference it by that name. The
   device publishes an empty `{}` to `d/{deviceId}/cfg/get` once per boot to ask
   for its config; the cloud answers by publishing a freshly-presigned config back
   on the device's existing `d/{deviceId}/cmd` topic (no new subscribe topic, no
