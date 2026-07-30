@@ -109,12 +109,33 @@ and pass a URL. The only device-activation path is the trigger API:
    caller hosts themselves. `app/api/v1/devices/[deviceId]/trigger/route.ts`
    checks device ownership/online status, reserves 1 credit
    (`lib/credits.ts` `reserveCredit`, lazily reconciling expired holds first),
-   and enqueues a `deviceCommand` row (`type: "trigger"`, `status: "pending"`).
-3. **Poll + render + ack**: the device polls `GET /api/device/commands`
-   (device-key auth) for pending commands, renders a QR from `payload.url`,
-   then `POST /api/device/commands/ack` with `{ commandId, ok }`. A success ack
+   enqueues a `deviceCommand` row (`type: "trigger"`, `status: "pending"`), and
+   publishes it to the device's MQTT `cmd` topic (`lib/mqtt.ts`
+   `publishCommand`). MQTT is the only transport — there is no fallback — so a
+   failed publish fails the request closed: the command is marked `failed`,
+   the credit reservation is cancelled, the idempotency claim is released, and
+   the caller gets `503 transport_unavailable`.
+3. **Deliver + render + ack**: the device is subscribed to `d/{deviceId}/cmd`,
+   renders a QR from `payload.url`, and publishes an ack on `d/{deviceId}/ack`.
+   EMQX's Data-Integration webhook forwards it to `POST /api/mqtt/ack`, which
    settles the reserved credit (`settleHold`); a failure or expiry releases it
    (`releaseHold`).
+
+**Device transport, in full.** MQTT (EMQX) carries commands, acks, heartbeat,
+presence, config and the OTA manifest — see `docs/runbooks/emqx-setup.md` for
+the broker setup and `lib/mqtt.ts` / `lib/mqtt-push.ts` for the publish seam.
+Config and the OTA manifest ride the device's existing `cmd` topic as
+payload-carrying `config-changed` / `firmware-update` commands; both are built
+fresh at publish time and never persisted on the command row, because they
+embed short-lived presigned R2 URLs. Config pushes are not version-gated —
+every claimed device gets the full config on every push. The device asks for
+its config once per MQTT connection by publishing to `d/{deviceId}/cfg/get`;
+it never polls on a timer. HTTPS survives only for two device-bootstrap
+routes — `GET /api/device/claim` (unauthenticated, one-time device-key
+delivery) and `GET /api/device/identity` (device-key auth; the one thing a
+device can't learn over MQTT before it can even connect — its own id and the
+broker's coordinates) — plus R2 asset fetches and the OTA binary download. Full
+design: `docs/superpowers/specs/2026-07-29-mqtt-only-device-transport-design.md`.
 
 ## Gotchas
 

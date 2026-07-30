@@ -72,7 +72,10 @@ curl -X POST -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
 
 ## 4. Data-Integration webhooks (broker → cloud)
 Create four HTTP-action webhooks, each sending header
-`x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`:
+`x-emqx-webhook-secret: <EMQX_WEBHOOK_SECRET>`. Once traffic is flowing, the
+admin `/admin/health` MQTT transport card is the fastest way to confirm all
+four rules are live — each of its four channels (Command acks, Heartbeats,
+Presence, Config requests) should read *live* rather than *never seen*:
 - **ack:** rule `SELECT payload, username FROM "d/+/ack"` → POST `<APP_URL>/api/mqtt/ack`,
   body = `{...payload, "clientid": username}` (order matters — the broker-injected
   `username` must be spread LAST so it wins over any `clientid` a device might put
