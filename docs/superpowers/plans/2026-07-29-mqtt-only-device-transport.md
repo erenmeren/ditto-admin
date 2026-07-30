@@ -1788,6 +1788,129 @@ only for the one-time claim, R2 asset fetches and the OTA binary download."
 
 ---
 
+### Task B0: Identity bootstrap over HTTPS (cloud, additive)
+
+**Added during execution, after Task B6's flash exposed a deadlock the spec missed.**
+
+Connecting to the broker needs four things: host, port, username and password. The password is the device key in NVS. The other three came **only** from the config's `mqtt` block — and config now arrives only over MQTT. So a device whose NVS config cache is empty can never start MQTT, and with the HTTP transport deleted there is nothing to break the cycle. Observed on hardware: firmware 0.18.0 booted, joined Wi-Fi, logged `cached config loaded (valid=0)`, and then looped `mqtt down; waiting for reconnect` forever.
+
+The spec's stated boundary — "bootstrap claim stays HTTPS because the device has no device key yet" — was right but incomplete. A *claimed* device also has to learn **its own identity and its broker address**, and that cannot travel over the transport it is required to configure. Learning them is bootstrap, so it belongs on the same HTTPS exception, once per device lifetime (plus once more if NVS is ever wiped).
+
+**Files:**
+- Create: `app/api/device/identity/route.ts`
+- Modify: `app/api/device/claim/route.ts` (return the same fields on a successful claim)
+- Modify: `lib/mqtt.ts` — reuse `buildMqttConfigBlock` so there is one definition of the broker block
+
+**Interfaces:**
+- Consumes: `authenticateDevice` (`lib/device-auth.ts`), `buildMqttConfigBlock` (`lib/mqtt.ts`).
+- Produces: `GET /api/device/identity` — device-key Bearer auth, returns `{ deviceId, mqtt: { host, port, clientId, username } | null }`. 401 on an unknown key. `mqtt` is null when the EMQX env group is absent.
+
+> **This changes Task C1.** C1 planned to delete `lib/device-auth.ts` on the grounds that the four HTTP routes were its only callers. This route is now a fifth, legitimate, permanent caller. `lib/device-auth.ts` and `app/api/device/identity/route.ts` both **survive** Phase C. Update C1 accordingly.
+
+- [ ] **Step 1: Write the route**
+
+```ts
+// GET /api/device/identity — device-key auth. The one thing a device cannot learn
+// over MQTT: which device it is, and where the broker is. Both are needed to open
+// the MQTT connection in the first place, so this stays on HTTPS alongside the
+// claim bootstrap. Called once per device lifetime — and again only if NVS is
+// wiped — never on a timer.
+
+import { NextResponse } from "next/server";
+import { authenticateDevice } from "@/lib/device-auth";
+import { buildMqttConfigBlock } from "@/lib/mqtt";
+
+export const runtime = "nodejs";
+
+export async function GET(req: Request) {
+  const device = await authenticateDevice(req);
+  if (!device) return NextResponse.json({ error: "Unknown or missing device key" }, { status: 401 });
+  const mqtt = await buildMqttConfigBlock(device.id);
+  return NextResponse.json({ deviceId: device.id, mqtt: mqtt ?? null });
+}
+```
+
+- [ ] **Step 2: Return the same fields from a successful claim**
+
+So a freshly claimed device never needs the extra round trip. In `app/api/device/claim/route.ts`, both success returns (the auto-claim path and the pending-key path) gain `deviceId` and the `mqtt` block from `buildMqttConfigBlock`. Read the file first — it has more than one success shape, and the `status` field must keep its current values.
+
+- [ ] **Step 3: Run the gate**
+
+Run: `npm test && npx tsc --noEmit && npm run build`
+Expected: PASS, 460 tests.
+
+- [ ] **Step 4: Commit and deploy**
+
+The firmware cannot boot without this, so it ships before the firmware does.
+
+```bash
+git add app/api/device/identity/route.ts app/api/device/claim/route.ts
+git commit -m "feat(device): identity bootstrap endpoint
+
+A device needs host, port and username to open its MQTT connection, and all
+three came only from the config's mqtt block — which now arrives only over
+MQTT. Hardware proved the deadlock: a device with an empty NVS config cache
+loops on reconnect forever with no way out. Learning your own identity and
+broker address is bootstrap, so it stays on HTTPS next to the claim, once per
+device lifetime."
+vercel --prod --yes
+```
+
+---
+
+### Task B5c: Bootstrap identity on the device (firmware)
+
+**Files:**
+- Modify: `components/appcfg/appcfg.c`, `components/appcfg/include/appcfg.h`
+- Modify: `main/Kconfig.projbuild` (broker host/port defaults)
+- Modify: `components/cloud/cloud.c`, `components/cloud/include/cloud.h` (the identity fetch)
+- Modify: `components/mqtt_ditto/mqtt_client.c`, `components/mqtt_ditto/include/mqtt_client_ditto.h`
+- Modify: `main/app_state.c`
+
+**Interfaces:**
+- Produces:
+  - `const char *appcfg_device_id(void)` / `bool appcfg_has_device_id(void)` / `void appcfg_store_device_id(const char *)` — NVS-first, Kconfig fallback, mirroring the existing device-key accessors.
+  - `const char *appcfg_mqtt_host(void)` / `int appcfg_mqtt_port(void)` / `void appcfg_store_mqtt(const char *host, int port)` — NVS-first, Kconfig fallback, mirroring `appcfg_base_url`.
+  - `bool cloud_fetch_identity(void)` — `GET /api/device/identity` with the device key; on success persists device id + broker via the appcfg setters. False on any failure.
+  - `mqtt_start(void)` — **signature change**: reads host/port/username from appcfg instead of a `device_config_t`. Both existing call sites change.
+
+- [ ] **Step 1: Add the appcfg accessors**
+
+Follow the existing device-key pattern in `components/appcfg/appcfg.c` exactly — same NVS namespace, same NVS-then-Kconfig fallback order, same no-op-on-empty behavior in the setters. Add `DITTO_MQTT_HOST` and `DITTO_MQTT_PORT` to `main/Kconfig.projbuild` beside the existing `DITTO_*` entries, defaulting to the production broker (`e11a0b73.ala.eu-central-1.emqxsl.com`, `8883`) so a device with empty NVS still has somewhere to go.
+
+- [ ] **Step 2: Add the identity fetch**
+
+`cloud_fetch_identity()` in `components/cloud/cloud.c`, modelled on the surviving `cloud_claim_poll` HTTP shape: Bearer device key, short timeout, parse `{deviceId, mqtt:{host,port}}`, persist via the appcfg setters, return false on any error. Declare it in `cloud.h`.
+
+- [ ] **Step 3: Rewire `mqtt_start`**
+
+Change it to `mqtt_start(void)`, taking host/port/username from appcfg and the password from `appcfg_device_key()`. Keep the "already running for the same broker/identity → no-op" behavior, comparing against the appcfg values.
+
+In the config-apply path, when the applied config's `mqtt` block differs from what appcfg holds, call `appcfg_store_mqtt(...)` first, then `mqtt_start()` — so a broker move delivered by config still takes effect.
+
+- [ ] **Step 4: Bootstrap at boot**
+
+In `app_state.c`, before the boot-time `mqtt_start()`: if `!appcfg_has_device_id()`, call `cloud_fetch_identity()`. Do this once the network is up, and retry on later loop iterations if it fails — it is the only path to a working device, so it must not be a single attempt. Then start MQTT whenever a device id and a device key are both present, **independently of whether a cached config exists** — that gate is what caused the deadlock.
+
+- [ ] **Step 5: Gates**
+
+Run: `make -C tools/cfg-harness test && idf.py build`
+Expected: 34 groups pass; build clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add components/ main/
+git commit -m "feat(device): bootstrap identity and broker from NVS, not from config
+
+MQTT needed host, port and username, all of which arrived only inside the config
+the device could not fetch without MQTT. Persist them in NVS instead, seeded by
+the identity endpoint (or by the claim response) and refreshed by any config that
+moves the broker. Starting MQTT no longer depends on a valid cached config."
+```
+
+---
+
 ### Task B6: Flash and HIL
 
 - [ ] **Step 1: Flash the device**
