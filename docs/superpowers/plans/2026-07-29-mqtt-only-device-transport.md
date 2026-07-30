@@ -1769,6 +1769,20 @@ Set the firmware version to `0.18.0` wherever `appcfg_fw_version` reads it (chec
 
 **This number is load-bearing, not cosmetic.** The cloud's `supportsConfigPush` (`lib/mqtt-push.ts`) carries a config in the MQTT message only for firmware `>= 0.18.0` and sends the legacy nudge otherwise. If reassembly ships under any other number, capable devices keep getting a nudge whose HTTP answer Phase C then deletes. If the release number has to change, change the threshold in `lib/mqtt-push.ts` and its tests in the same commit.
 
+> **Deleting `ota_check_and_update` also deletes the device's OTA version guard — restore it.**
+> That function wrapped the download in `ota_should_update(running, manifest)`.
+> `ota_start_with_manifest` (Task B4) has no such check, so after this deletion the
+> device applies *any* manifest handed to it: publishing a release fans a manifest
+> out to every claimed device, including ones already on that version, and each one
+> downloads 1.6 MB and reboots for nothing. Caught before the first publish; fixed
+> in firmware `dcb83c0` by guarding with `ota_should_update` and pinning the
+> equal-version case in the harness.
+>
+> Keep that guard a plain *difference* check, not an ordering one. On the device,
+> "the manifest names a version other than the one I run, so apply it" is correct —
+> it allows an operator-pushed rollback. Deciding direction belongs to the cloud,
+> which does it in the heartbeat reconcile (`isFirmwareBehindLatest`).
+
 - [ ] **Step 5: Run tests and build**
 
 Run: `make -C tools/cfg-harness test && idf.py build`
