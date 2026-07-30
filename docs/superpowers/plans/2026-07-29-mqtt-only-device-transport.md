@@ -2056,6 +2056,49 @@ they were) are gone. The device key survives purely as the MQTT password.
 
 ---
 
+### Task C1b: Retire the config-push version gate
+
+**Added during execution, from C1's review.** `publishConfigCommand` gates on `supportsConfigPush(dev.firmwareVersion)` and falls back to a `payload: null` nudge for firmware below 0.18.0. That gate existed so Phase A could publish safely to firmware that could not reassemble a 5.3 KB message — the nudge's answer was `GET /api/device/config`. **Task C1 deleted that route**, so the fallback is now a dead end: a device that takes it gets a message it cannot act on and has nowhere to fetch from.
+
+Removing the gate also fixes a second, already-observed problem. It reads `device.firmwareVersion`, which only a heartbeat updates, so a device that is *actually* on 0.18.0 but has not heartbeated yet — a fresh claim, or the first boot after an upgrade — is served a nudge. On hardware this produced three `cfg/get` round trips before converging (2026-07-30). Always carrying the config removes that entirely.
+
+The consequence is explicit and accepted: after Phase C, firmware below 0.18.0 is unsupported. It receives a carried config it cannot reassemble and has no HTTP route to fall back on. That is the same consequence Phase C already has for every other device interaction.
+
+**Files:**
+- Modify: `lib/mqtt-push.ts` — drop the gate and the nudge branch; delete `supportsConfigPush` and `parseFirmwareVersion` if nothing else uses them
+- Modify: `lib/mqtt-push.test.ts` — remove the gate's tests
+- Modify: `app/api/mqtt/config-request/route.ts`, `lib/data.ts`, `app/api/mqtt/heartbeat/route.ts` — drop `firmwareVersion` from their `PushTarget` selects if it becomes unused
+
+**Careful:** `parseFirmwareVersion` is also used by `isFirmwareBehindLatest`, the ordering check that stops the cloud from pushing a downgrade. **Keep both of those.** Only the config-push gate goes.
+
+- [ ] **Step 1: Remove the gate**
+
+`publishConfigCommand` always builds and publishes the full config. Delete the `payload: null` branch and the comment describing the HTTP fallback.
+
+- [ ] **Step 2: Prune what is now unused**
+
+Delete `supportsConfigPush` and its tests. Check whether `PushTarget.firmwareVersion` still has a reader; if not, remove the field and the three selects that populate it.
+
+- [ ] **Step 3: Gate**
+
+Run: `npm test && npx tsc --noEmit && npm run build`
+Expected: PASS. The suite shrinks by the gate's tests.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git commit -am "refactor(mqtt): always carry the config; retire the version gate
+
+The gate let Phase A publish safely to firmware that could not reassemble a
+5.3KB message, falling back to a nudge answered by GET /api/device/config. That
+route is gone, so the fallback was a dead end. It also read a firmwareVersion
+only a heartbeat updates, so a device genuinely on 0.18.0 that had not checked in
+yet was served a nudge — observed as three cfg/get round trips on hardware.
+Firmware below 0.18.0 is unsupported after Phase C, deliberately."
+```
+
+---
+
 ### Task C2: A trigger that cannot be published fails loudly
 
 **Files:**
