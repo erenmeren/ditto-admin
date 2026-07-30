@@ -125,15 +125,22 @@ passes a URL.
    header. Body `{ action: "show_qr", payload: { url } }`. The route checks device
    ownership/online status, **reserves 1 credit** (`lib/credits.ts`), and enqueues
    a `deviceCommand` row (`type: "trigger"`, `status: "pending"`).
-4. **Poll + render + ack** — the device polls `GET /api/device/commands`
-   (device-key auth) for pending commands, renders a QR from `payload.url`, then
-   `POST /api/device/commands/ack` with `{ commandId, ok }`. A success ack settles
-   the reserved credit; a failure or expiry releases it.
+4. **Publish, render, ack** — the trigger route publishes a `trigger` command
+   on the device's MQTT `d/{deviceId}/cmd` topic (device-key auth against the
+   broker, not HTTP). The device renders a QR from `payload.url`, then
+   publishes `{ commandId, ok }` to `d/{deviceId}/ack`. A success ack settles
+   the reserved credit; a failure or expiry releases it. A publish that fails
+   fails closed — the command, reservation, and idempotency claim all unwind
+   and the caller gets `503`.
 
-Devices also poll `GET /api/device/config` for org-wide device policy
-(brightness / sleep / QR duration / PIN) and pull firmware from
-`GET /api/device/firmware`. See [`device-protocol.md`](device-protocol.md)
-and the machine-readable API spec at `GET /api/v1/openapi.json`.
+Org-wide device policy (brightness / sleep / QR duration / PIN) and the
+firmware manifest ride the same MQTT `cmd` topic as payload-carrying
+`config-changed` / `firmware-update` commands — pushed on save and rebuilt
+fresh on every publish, since they embed short-lived presigned R2 URLs. A
+device asks for its config once per MQTT connection by publishing `{}` to
+`d/{deviceId}/cfg/get`; it never polls on a timer. See
+[`device-protocol.md`](device-protocol.md) and the machine-readable API spec
+at `GET /api/v1/openapi.json`.
 
 ## Factory registry & zero-touch provisioning
 
