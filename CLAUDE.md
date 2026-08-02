@@ -114,7 +114,9 @@ and pass a URL. The only device-activation path is the trigger API:
    `publishCommand`). MQTT is the only transport — there is no fallback — so a
    failed publish fails the request closed: the command is marked `failed`,
    the credit reservation is cancelled, the idempotency claim is released, and
-   the caller gets `503 transport_unavailable`.
+   the caller gets `503 transport_unavailable`. A deployment with no EMQX env
+   group at all is rejected earlier — before any reservation — with a distinct
+   `503 transport_unconfigured`, since that one cannot succeed on retry.
 3. **Deliver + render + ack**: the device is subscribed to `d/{deviceId}/cmd`,
    renders a QR from `payload.url`, and publishes an ack on `d/{deviceId}/ack`.
    EMQX's Data-Integration webhook forwards it to `POST /api/mqtt/ack`, which
