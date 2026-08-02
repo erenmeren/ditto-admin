@@ -4,7 +4,12 @@ One-time setup to activate the MQTT device transport. MQTT is the only device
 transport — there is no fallback. Until these steps are done and the env vars
 are set (`mqttEnabled()` false), no device can be reached at all: commands
 cannot be published, config cannot be delivered, and the trigger API fails
-closed with `503 transport_unavailable`.
+closed with `503 transport_unconfigured` — the code that says *this deployment
+has no transport*, so retrying cannot help until the setup below is done. Once
+it is configured, a broker that refuses a publish answers `503
+transport_unavailable` instead, which IS worth retrying. If you are debugging a
+trigger failure, that pair tells you immediately whether to look at the env
+vars or at the broker.
 
 ## 1. Create the deployment
 - EMQX Cloud → Serverless → region **eu-central-1 (Frankfurt)**.
