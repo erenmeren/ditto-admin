@@ -1,6 +1,6 @@
 # Ditto Admin — Product Roadmap
 
-_Last updated: 2026-07-01_
+_Last updated: 2026-08-03_
 
 > **Terminology note.** This product has been renamed twice since the original
 > roadmap: **kiosk → printer** (2026-06-13) and **receipt → document**
@@ -165,6 +165,21 @@ model) and **monthly invoices** (generation → collection → dunning → recei
     export (merged+deployed 2026-07-01). Ships inert until Resend domain
     verification. ⏳ Open: **loyalty**.
 - **Infra** — ⏳ OPEN: multi-region R2, white-label custom domains per tenant.
+- **Integrator credibility pack** — ⏳ OPEN (added 2026-08-03, from the marketing-site
+  panel's integrator persona: these are the prerequisites a POS vendor checks before
+  committing to the trigger API; the site's docs page honestly says "no status
+  endpoint yet", which is fine for a pilot café but blocks a platform integration).
+  1. **Command status + lifecycle webhooks** — `GET /api/v1/commands/{id}` and
+     `command.settled` / `command.expired` events. The signed-webhook infra above
+     already ships for `document.*`; this extends the event catalog to the trigger
+     lifecycle. Integrators need it for the "not shown → fall back to the printer"
+     path; becomes critical for non-receipt payloads (tickets, warranty).
+  2. **Sandbox mode** — `sk_test_…` API keys + a virtual device in the console that
+     simulates the ack, so an integration can be written and CI-tested without
+     hardware on the desk. No POS vendor puts a hardware-gated API in a sprint.
+  3. **Versioning & limits in writing** — deprecation policy + changelog for
+     `/api/v1`, and a concrete published number for the 429 per-device monthly
+     ceiling (docs currently name the ceiling but not the number).
 
 ---
 
@@ -189,7 +204,10 @@ separately.)
   - **Email-domain verification** (§3) — flips `requireEmailVerification` on and
     lets Phase 3C customer emails actually deliver (today: `erenaltan@…` only).
 - Remaining Phase 3 initiatives (loyalty; multi-region R2; white-label custom
-  domains) each get their own `spec → plan → implementation` cycle when started.
+  domains; the integrator credibility pack) each get their own
+  `spec → plan → implementation` cycle when started. Within the credibility pack,
+  command status (item 1) is the natural first slice — smallest surface, unblocks
+  the most integrator objections, and the webhook plumbing already exists.
 - **Standing ops items (user-owned):** Stripe dashboard meter `event_name` →
   `documents`; Resend domain verification; Stripe test → live keys (deferred to
   project completion).
