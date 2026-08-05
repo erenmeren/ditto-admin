@@ -20,8 +20,7 @@ backed by a real database, auth, object storage, and prepaid-credit billing.
 - **Better Auth** (email/password + organization plugin) — `organization = tenant`
 - **Cloudflare R2** (S3-compatible) for private object storage (tenant branding
   assets, firmware binaries)
-- **Stripe** (prepaid credit-pack top-ups) · **Resend** (transactional email) ·
-  **Sentry** (optional observability)
+- **Resend** (transactional email) · **Sentry** (optional observability)
 
 > One emerald `--primary` token drives the app chrome. A store's own brand color
 > is **data**, shown only inside the tenant Branding screen — never in the chrome.
@@ -45,8 +44,6 @@ npm run dev                  # http://localhost:3000
 | `BETTER_AUTH_URL` | App base URL |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | Cloudflare R2 object storage |
 | `RESEND_API_KEY` / `EMAIL_FROM` | Transactional email (optional — absent → emails are logged, not sent) |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | Stripe credit-pack checkout (optional — absent → billing is inert) |
-| `STRIPE_CREDIT_PACK_PRICE_IDS` | Comma-separated Stripe price IDs offered as credit packs |
 | `SENTRY_DSN` / `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Error tracking (optional) |
 | `CRON_SECRET` | Shared secret authenticating scheduled `/api/cron/*` calls |
 
@@ -177,10 +174,10 @@ server-side `isOrgArchived` guard blocks admin mutations. **Restore** un-archive
 Credits are the **only** payment path — there is no per-print invoicing or metered
 subscription. Each successful device trigger consumes one credit
 (reserve → settle on ack, release on failure/expiry). New orgs receive a starter
-grant on signup. Tenants top up by buying credit packs via Stripe Checkout
-(`STRIPE_CREDIT_PACK_PRICE_IDS`); the `/api/stripe/webhook` route grants credits on
-a completed purchase. The `creditLedger` table is the append-only source of truth;
-`creditBalance` is the running total.
+grant on signup. Tenants cannot buy credits in-app: the operator invoices customers
+manually and grants (or deducts) credits from the super-admin customer page. The
+`creditLedger` table is the append-only source of truth; `creditBalance` is the
+running total.
 
 ## Testing
 
@@ -188,8 +185,8 @@ a completed purchase. The `creditLedger` table is the append-only source of trut
 npm test
 ```
 
-Pure domain logic is unit-tested with vitest (`lib/**/*.test.ts`, 37 suites /
-260 tests) — device status derivation, health alerts, credit usage/overview
+Pure domain logic is unit-tested with vitest (`lib/**/*.test.ts`, 48 suites /
+474 tests) — device status derivation, health alerts, credit usage/overview
 rollups, API-key scopes, OpenAPI/serialization, audit labels, rate limiting,
 trigger actions, provisioning + factory-registry decision logic, offboarding
 helpers, printer layout/geometry, timezones, and member-role rules.
