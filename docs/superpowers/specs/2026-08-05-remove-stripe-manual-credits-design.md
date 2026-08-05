@@ -119,8 +119,10 @@ Ditto — contact us to top up (English UI copy, final wording at implementation
 
 ## Testing
 
-- New unit tests for `deductCredits`: happy path, insufficient-balance guard,
-  held untouched, ledger row shape.
+- `deductCredits` is DB-bound like every other primitive in `lib/credits.ts`
+  (none have unit tests; there is no DB-mock infrastructure). The tested
+  surface is the pure side: `rollupCredits` gets a unit test for `"adjust"`
+  rows netting against granted totals.
 - `integration-status` tests updated for Stripe removal.
 - Full suite + `tsc` + `next build` stay green.
 
